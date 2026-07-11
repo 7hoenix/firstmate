@@ -57,6 +57,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every spawned worktree (ship, scout, and secondmate home) has commit and tag
+#   signing disabled scoped to that worktree only, so an autonomous crewmate never
+#   blocks on an interactive commit signer; the primary and siblings keep their
+#   normal signing (fm-sign-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -84,7 +88,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,82p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -102,6 +106,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-sign-lib.sh
+. "$SCRIPT_DIR/fm-sign-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
@@ -836,6 +842,19 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+
+# Disable commit signing scoped to THIS task worktree ($WT is now final for every
+# kind: a ship/scout treehouse-or-Orca worktree, or a secondmate home). An
+# autonomous crewmate can never satisfy an interactive commit signer, so a global
+# commit.gpgsign=true would block every commit; the primary checkout, sibling
+# pooled worktrees, and the captain's own repos keep their normal signing
+# (fm-sign-lib.sh). Secondmate homes are included deliberately: they are worktrees
+# of the firstmate repo an autonomous agent commits shared material in, so the same
+# block would hit them. Best-effort: a failure warns but does not abort a spawn
+# whose worktree is already live.
+if ! disable_worktree_commit_signing "$WT"; then
+  echo "warning: could not disable commit signing in $WT; autonomous commits may block on an interactive signer" >&2
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
