@@ -703,7 +703,12 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# Use a leading-anchored alternation, not a bracket expression: under a C/POSIX
+# LC_CTYPE, grep treats [❯›] as a set of individual BYTES, so any multibyte
+# glyph sharing a lead byte (every box-drawing corner ╭ ╰ ╮ ╯ starts with 0xe2,
+# as do ❯/›) would false-match the whole-row byte prefix; ^❯|^› matches only the
+# exact multibyte sequences.
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^❯|^›'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap line raw_line trimmed stripped="" found=0 shape="" raw_match="" faint_tail=0
