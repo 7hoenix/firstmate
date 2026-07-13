@@ -750,10 +750,11 @@ The tmux backend was NOT affected: it is a claude-UI behavior, but `fm_tmux_comp
 
 **Fix:** `fm_backend_herdr_composer_state` now recognizes claude's queued-message state explicitly and reports `empty` when it is present, independent of the placeholder's styling.
 `FM_BACKEND_HERDR_QUEUED_HINT_RE` matches the composer's own placeholder row (leading agent prompt glyph, then the `Press up to edit queued message(s)` phrase anchored at end-of-row) on the PLAIN row, so the verdict no longer depends on incidental de-emphasis.
-The `.*` between glyph and phrase is deliberate - the separator is the NO-BREAK SPACE above, so a literal-space pattern would silently never match.
-This is safe against weakening true-negative detection: the placeholder is claude's EMPTY-composer hint and is REPLACED the instant a human types real input (verified live - typing while messages were queued dropped the hint and left the typed text on the composer row), so a genuinely-unsubmitted composer never carries the hint and still reads `pending`.
+Between glyph and phrase the pattern allows only a run of non-alphanumeric characters (`[^A-Za-z0-9]*`), not an unbounded `.*`: this tolerates the NO-BREAK SPACE separator above (a literal-space pattern would silently never match) while refusing any composer row whose real typed text - which always contains word characters - precedes the phrase.
+The earlier unbounded `.*` was unsafe: a genuinely-unsubmitted message that merely ends with `Press up to edit queued messages` (plausible in this very repo, where steers discuss this herdr UI string) would false-match and report a lost message as submitted - the more dangerous direction than a false send-fail.
+This is safe against weakening true-negative detection two ways: the placeholder is claude's EMPTY-composer hint and is REPLACED the instant a human types real input (verified live - typing while messages were queued dropped the hint and left the typed text on the composer row), and even a message that ends with the phrase reads `pending` because its leading words are alphanumeric.
 `FM_BACKEND_HERDR_QUEUED_HINT_RE` is documented in [`docs/configuration.md`](configuration.md).
-See `fm_backend_herdr_composer_state` in `bin/backends/herdr.sh`, and the `composer_state`/`send_text_submit` queued-message cases in `tests/fm-backend-herdr.test.sh` (built from the captured bytes, including the non-dim incident shape and the genuinely-unsubmitted true negative).
+See `fm_backend_herdr_composer_state` in `bin/backends/herdr.sh`, and the `composer_state`/`send_text_submit` queued-message cases in `tests/fm-backend-herdr.test.sh` (built from the captured bytes, including the non-dim incident shape, the genuinely-unsubmitted true negative, and the unsubmitted-message-ending-in-the-hint-phrase true negative that pins the separator-only tightening).
 
 ## Known gaps and follow-up notes
 

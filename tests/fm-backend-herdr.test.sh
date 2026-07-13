@@ -1108,6 +1108,25 @@ test_composer_state_unsubmitted_text_while_queued_is_pending() {
   pass "fm_backend_herdr_composer_state: genuinely-unsubmitted text while messages are queued still reads pending"
 }
 
+# The substring-match hazard the tightened queued-hint regex closes: a genuinely
+# UNSUBMITTED message whose real typed text merely ENDS with the phrase "Press up
+# to edit queued messages" (e.g. a firstmate steer discussing this very herdr UI
+# string) - with NO separate queued-indicator/placeholder row. The old unbounded
+# `.*` between the glyph and the phrase would false-match this composer as empty
+# and report a lost message as submitted (the more dangerous direction); the
+# separator-only [^A-Za-z0-9]* class refuses it because real words precede the
+# phrase, so it must still read pending.
+test_composer_state_unsubmitted_message_ending_in_hint_phrase_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-ends-with-hint"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0\x1b[0mremind them they can Press up to edit queued messages\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n  Opus 4.8 (1M context)\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "an unsubmitted message whose real text merely ends with 'Press up to edit queued messages' must read pending, got '$out' (regression: the unbounded .* substring-matched it as submitted, a silently lost message)"
+  pass "fm_backend_herdr_composer_state: an unsubmitted message ending in the hint phrase still reads pending (separator-only regex tightening)"
+}
+
 # End-to-end through the submit path: when the pre-Enter baseline is BUSY (claude
 # already working), send confirmation falls back to composer_state. A delivered
 # mid-turn message leaves the composer in claude's queued state, which now reads
@@ -2115,6 +2134,7 @@ test_composer_state_codex_non_faint_same_text_is_pending
 test_composer_state_claude_queued_dim_placeholder_is_empty
 test_composer_state_claude_queued_nondim_placeholder_is_empty
 test_composer_state_unsubmitted_text_while_queued_is_pending
+test_composer_state_unsubmitted_message_ending_in_hint_phrase_is_pending
 test_send_text_submit_queued_midturn_confirms_submitted
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window

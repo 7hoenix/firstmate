@@ -748,12 +748,19 @@ FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^❯|^›'}
 # same C/POSIX-locale hazard the bare-prompt RE above documents) AND the exact
 # hint phrase anchored at end-of-row keeps it matching ONLY the composer's own
 # placeholder, never a delivered message's text or an incidental scrollback
-# mention. The `.*` between the glyph and the phrase is deliberate: claude
-# renders the glyph-to-text separator as a NO-BREAK SPACE (U+00A0), not an ASCII
-# space (verified live 2026-07-13), so a literal-space pattern would silently
-# never match. "messages?" tolerates a future singular form; the observed live
+# mention. Between the glyph and the phrase we allow only a run of
+# non-alphanumeric characters ([^A-Za-z0-9]*), NOT an unbounded `.*`: this still
+# tolerates claude's glyph-to-text separator, which is rendered as a NO-BREAK
+# SPACE (U+00A0), not an ASCII space (verified live 2026-07-13, so a literal-space
+# pattern would silently never match), while refusing any row whose real typed
+# text precedes the phrase. The earlier unbounded `.*` was unsafe: a genuinely
+# UNSUBMITTED message that merely ends with "Press up to edit queued messages"
+# would false-match, and composer_state would report it empty (submitted) - a
+# silently lost message, the more dangerous direction than a false send-fail.
+# Real message text always contains word characters, so the separator-only class
+# excludes it. "messages?" tolerates a future singular form; the observed live
 # wording is always plural.
-FM_BACKEND_HERDR_QUEUED_HINT_RE=${FM_BACKEND_HERDR_QUEUED_HINT_RE:-'^❯.*Press up to edit queued messages?$|^›.*Press up to edit queued messages?$'}
+FM_BACKEND_HERDR_QUEUED_HINT_RE=${FM_BACKEND_HERDR_QUEUED_HINT_RE:-'^❯[^A-Za-z0-9]*Press up to edit queued messages?$|^›[^A-Za-z0-9]*Press up to edit queued messages?$'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped queued=0
