@@ -1048,6 +1048,88 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
   pass "fm_backend_herdr_composer_state: non-faint codex prompt text still reads pending"
 }
 
+# --- composer_state: claude queued-message ("Press up to edit") state ---------
+# Regression coverage for the 2026-07-13 false-send-fail (docs/herdr-backend.md
+# "Incident (2026-07-13)"). When a mid-turn message is accepted while claude is
+# busy, claude renders the DELIVERED message as a `❯`-prefixed queued indicator
+# row ABOVE the composer, and the composer itself returns to EMPTY showing the
+# placeholder hint "Press up to edit queued messages". Every fixture below is
+# built from bytes captured verbatim from a real herdr 0.7.3 session running
+# real claude 2.1.197: the composer's glyph-to-text separator is a NO-BREAK
+# SPACE (\xc2\xa0, U+00A0), the queued indicator's own message text is BRIGHT
+# white (38;2;255;255;255) - i.e. NOT ghost/de-emphasised, so it is byte-shape-
+# identical to genuinely-unsubmitted composer text - and the placeholder is
+# rendered dim (\x1b[2m) on THIS build. The bug: verification's correctness hung
+# entirely on that incidental dim styling; a build that renders the placeholder
+# at normal intensity read the queued (submitted) state as unsubmitted 'pending'
+# and fm-send falsely exited 1.
+
+test_composer_state_claude_queued_dim_placeholder_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-queued-dim"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Bright queued indicator ABOVE, dim "Press up to edit queued messages" composer BELOW (this build).
+  printf '  \x1b[0m\x1b[38;2;80;80;80m\x1b[48;2;55;55;55m\xe2\x9d\xaf \x1b[0m\x1b[38;2;255;255;255m\x1b[48;2;55;55;55mone single queued message here\x1b[0m\n\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0\x1b[0m\x1b[2mPress up to edit queued messages\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n  Opus 4.8 (1M context)\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "claude's queued-message state (composer empty, dim 'Press up to edit' hint) must read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: claude's queued-message state with a dim placeholder reads empty"
+}
+
+# THE incident regression: the identical real capture, but with the placeholder
+# rendered at NORMAL intensity (the \x1b[2m dim attribute removed) exactly as the
+# non-dim build in the 2026-07-13 incident rendered it. Before the fix this read
+# 'pending' (the false send-fail); the queued-hint detection makes it read empty
+# independent of the placeholder's styling.
+test_composer_state_claude_queued_nondim_placeholder_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-queued-nondim"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  \x1b[0m\x1b[38;2;80;80;80m\x1b[48;2;55;55;55m\xe2\x9d\xaf \x1b[0m\x1b[38;2;255;255;255m\x1b[48;2;55;55;55mone single queued message here\x1b[0m\n\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0\x1b[0mPress up to edit queued messages\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n  Opus 4.8 (1M context)\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "claude's queued-message state with a NON-dim 'Press up to edit' hint (the 2026-07-13 incident shape) must read empty, got '$out' (regression: this false 'pending' made fm-send exit 1 for a delivered mid-turn message)"
+  pass "fm_backend_herdr_composer_state: claude's queued-message state with a NON-dim placeholder reads empty (the 2026-07-13 incident fix)"
+}
+
+# The genuinely-unsubmitted true negative that the fix must NOT weaken: with
+# messages already queued (an indicator row above), a human typing new text into
+# the composer REPLACES the placeholder hint - so the hint is absent and the
+# bottom composer row holds real, unsubmitted text (verified live: the hint
+# disappears the instant real input is typed). This must still read pending.
+test_composer_state_unsubmitted_text_while_queued_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-queued-unsubmitted"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  \x1b[0m\x1b[38;2;80;80;80m\x1b[48;2;55;55;55m\xe2\x9d\xaf \x1b[0m\x1b[38;2;255;255;255m\x1b[48;2;55;55;55mone single queued message here\x1b[0m\n\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0\x1b[0mthis is unsubmitted text still in the composer\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n  Opus 4.8 (1M context)\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "genuinely-unsubmitted composer text (queued indicators above, NO 'Press up' hint) must still read pending, got '$out' (the queued-hint fix must not weaken true-negative detection)"
+  pass "fm_backend_herdr_composer_state: genuinely-unsubmitted text while messages are queued still reads pending"
+}
+
+# End-to-end through the submit path: when the pre-Enter baseline is BUSY (claude
+# already working), send confirmation falls back to composer_state. A delivered
+# mid-turn message leaves the composer in claude's queued state, which now reads
+# empty, so send_text_submit reports 'empty' (submitted) instead of the false
+# 'pending' that made fm-send exit 1. Uses the non-dim placeholder (incident
+# shape) to prove the submit path is fixed independent of styling.
+test_send_text_submit_queued_midturn_confirms_submitted() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-queued-midturn"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: pane send-text (literal, no output)
+  # 2: agent get - pre-Enter baseline is working (busy) -> composer-read confirmation path
+  # 3: send-keys enter
+  # 4: pane read - claude's queued state, non-dim placeholder (the incident shape)
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '  \x1b[0m\x1b[38;2;80;80;80m\x1b[48;2;55;55;55m\xe2\x9d\xaf \x1b[0m\x1b[38;2;255;255;255m\x1b[48;2;55;55;55mcaptain please add a NoSQL section\x1b[0m\n\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0\x1b[0mPress up to edit queued messages\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "captain please add a NoSQL section" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "send_text_submit must confirm a busy-baseline mid-turn message that landed in claude's queued state as submitted (empty), got '$out' (regression: false 'pending' -> fm-send exit 1)"
+  pass "fm_backend_herdr_send_text_submit: a mid-turn message queued while claude is busy confirms as submitted, not a false pending"
+}
+
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
@@ -2030,6 +2112,10 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
+test_composer_state_claude_queued_dim_placeholder_is_empty
+test_composer_state_claude_queued_nondim_placeholder_is_empty
+test_composer_state_unsubmitted_text_while_queued_is_pending
+test_send_text_submit_queued_midturn_confirms_submitted
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep

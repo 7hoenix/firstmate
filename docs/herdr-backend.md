@@ -725,6 +725,35 @@ On entry the launcher drops the prior session's artifacts when the daemon is not
 This never drops a genuinely-pending escalation: the durable record is `state/.wake-queue` plus each crew's `state/<id>.status`, and any still-true condition is re-escalated by the daemon's heartbeat catch-all scan.
 Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry vs refresh, and the stop ordering asserting the daemon saw `state/.afk` present at SIGTERM).
 
+## Incident (2026-07-13, herdr 0.7.3, protocol 16, claude 2.1.197, macOS aarch64): a mid-turn message queued while busy read as a false "send failed"
+
+`fm-send.sh` sent a steer to a BUSY claude crewmate on herdr.
+Claude accepted it as a mid-turn queued message: the delivered text appeared as a `❯`-prefixed "queued" indicator row ABOVE the composer, and the composer itself returned to empty showing the placeholder hint `Press up to edit queued messages`.
+The message was genuinely submitted and later processed, but `fm_backend_herdr_send_text_submit` returned `pending` and `fm-send.sh` exited 1, surfacing a false "send failed" - which invites a dangerous double-send retry.
+
+Root cause, reproduced live against real claude 2.1.197 on an isolated herdr 0.7.3 lab session (`bin/fm-herdr-lab.sh`, fleet-state tripwire armed, `default` byte-identical before/after).
+Because the pre-Enter baseline was `working` (busy), submit confirmation cannot use native agent-state (a still-`working` read cannot prove THIS Enter landed versus the agent already working), so it falls back to `fm_backend_herdr_composer_state`.
+The captured ANSI of the queued state showed two `❯`-prefixed rows: the delivered message rendered as a queued indicator whose text is BRIGHT white (`38;2;255;255;255`) - not de-emphasised, so `fm_composer_strip_ghost` keeps it and it is byte-shape-identical to genuinely-unsubmitted composer text - and, below it, the empty composer showing `❯<U+00A0>Press up to edit queued messages`.
+The composer's glyph-to-text separator is a NO-BREAK SPACE (`\xc2\xa0`, U+00A0), not an ASCII space.
+On this build the placeholder is rendered dim (`\x1b[2m`), so `strip_ghost` dropped it and the row read empty - but that correctness was purely incidental to the dim styling.
+Removing only the `\x1b[2m` attribute from the identical real capture (as a build that renders the hint at normal intensity does) made `fm_backend_herdr_composer_state` return `pending` - the exact false send-fail:
+
+```
+# same real queued-state capture, fed to fm_backend_herdr_composer_state
+dim placeholder (this build):        empty     # accidentally correct
+non-dim placeholder (incident build): pending   # FALSE "send failed" -> fm-send exit 1
+genuinely-unsubmitted composer text:  pending   # correct true negative
+```
+
+The tmux backend was NOT affected: it is a claude-UI behavior, but `fm_tmux_composer_state` and this incident's fix are backend-scoped, and no tmux change was made.
+
+**Fix:** `fm_backend_herdr_composer_state` now recognizes claude's queued-message state explicitly and reports `empty` when it is present, independent of the placeholder's styling.
+`FM_BACKEND_HERDR_QUEUED_HINT_RE` matches the composer's own placeholder row (leading agent prompt glyph, then the `Press up to edit queued message(s)` phrase anchored at end-of-row) on the PLAIN row, so the verdict no longer depends on incidental de-emphasis.
+The `.*` between glyph and phrase is deliberate - the separator is the NO-BREAK SPACE above, so a literal-space pattern would silently never match.
+This is safe against weakening true-negative detection: the placeholder is claude's EMPTY-composer hint and is REPLACED the instant a human types real input (verified live - typing while messages were queued dropped the hint and left the typed text on the composer row), so a genuinely-unsubmitted composer never carries the hint and still reads `pending`.
+`FM_BACKEND_HERDR_QUEUED_HINT_RE` is documented in [`docs/configuration.md`](configuration.md).
+See `fm_backend_herdr_composer_state` in `bin/backends/herdr.sh`, and the `composer_state`/`send_text_submit` queued-message cases in `tests/fm-backend-herdr.test.sh` (built from the captured bytes, including the non-dim incident shape and the genuinely-unsubmitted true negative).
+
 ## Known gaps and follow-up notes
 
 - **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.
