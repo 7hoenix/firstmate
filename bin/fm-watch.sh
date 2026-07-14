@@ -171,6 +171,40 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# strip_animated_chrome: drop decorative animation glyphs from a pane capture
+# (stdin -> stdout) BEFORE it is hashed for staleness. A fully idle crew pane
+# still redraws its footer chrome - the context-meter sparkline, a dot spinner -
+# so the RAW capture differs on every poll even when nothing meaningful changed,
+# which defeats the stale-hash dedupe (.stale-<key>) and fires a fresh stale:
+# wake every cycle on a quiet pane (the 2026-07-13 idle-claude wake loop). These
+# glyphs live in two Unicode blocks that never appear in real conversation or
+# code text: Block Elements (U+2580-259F, the sparkline bars, UTF-8 E2 96 80..9F)
+# and Braille Patterns (U+2800-28FF, dot spinners, UTF-8 E2 A0 80..A3 BF).
+# Dropping them makes the hash insensitive to animation while ANY meaningful text
+# change still changes the hash. Byte-wise under LC_ALL=C so it is
+# locale-independent and identical for the tmux and herdr capture paths (both
+# feed fm_backend_capture plain text). This normalizes ONLY the hash input; the
+# raw tail40 still drives window_is_busy, whose BUSY_REGEX lives in the same
+# footer, so real work still suppresses stale detection. perl -0777 slurps the
+# entire capture and substitutes only the target glyph byte-sequences, preserving
+# every other byte including blank lines and the presence or absence of a trailing
+# newline, so a glyph-free capture hashes identically to the old raw path. (BSD awk
+# with RS="\0" instead enters paragraph mode - splitting on blank lines and
+# dropping the trailing newline - which breaks that byte-exact invariant.) The strip
+# is a best-effort optimization gated on perl (like fm-crew-state.sh and
+# fm-bearings-snapshot.sh); when perl is absent the capture passes through raw so
+# staleness detection degrades to the pre-strip raw-hash behavior - still fully
+# functional, just without animation dedupe - rather than a swallowed missing-perl
+# exit 127 (the script sets only set -u, no pipefail) making hash_pane hash empty
+# input every poll and silently defeating stale detection.
+strip_animated_chrome() {
+  if command -v perl >/dev/null 2>&1; then
+    LC_ALL=C perl -0777 -pe 's/\xe2\x96[\x80-\x9f]//g; s/\xe2[\xa0-\xa3][\x80-\xbf]//g'
+  else
+    cat
+  fi
+}
+
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
 # a backend's native semantic busy state (fm_backend_busy_state - herdr's
 # agent.get; herdr-addendum "busy state" row, "the first backend where
@@ -360,11 +394,19 @@ pause_state_class() {  # <window> <task>
     return
   fi
   class=$(crew_absorb_class "$task")
+  # The crew's status STILL declares the pause here. Only an authoritative
+  # `working` verdict cancels it (the crew resumed and started a run/busy pane).
+  # Anything else - `paused`, or an uncertain/transient `none` (a bounded
+  # no-mistakes probe that timed out, a stale completed run mis-attributed) -
+  # keeps the declared pause and is rechecked on the long PAUSE_RESURFACE_SECS
+  # cadence, never surfaced as an immediate wedge. Collapsing `none` into `paused`
+  # here is what stops a flickering verdict from escaping to surface_nonterminal_stale
+  # and re-surfacing every cycle (the 2026-07-13 expired-pause loop); the costly
+  # read is throttled by refreshing the recheck marker either way.
   case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
+    working) rm -f "$recheck_file"; printf 'working' ;;
+    *)       date +%s > "$recheck_file"; printf 'paused' ;;
   esac
-  printf '%s' "$class"
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
@@ -372,7 +414,15 @@ surface_nonterminal_stale() {  # <window> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  # Clear the pause-MODE markers (this stale is not an absorbed pause) but NOT the
+  # durable resurface throttle .paused-resurfaced-<key>: that cadence marker is
+  # owned by the declared-pause recheck (handle_paused_stale) and cleared only by
+  # a genuine unpause (clear_pause_state). Deleting it here re-opened the recheck
+  # loop - a still-paused crew whose authoritative verdict flickered would surface
+  # here, wipe the throttle, and re-surface on the very next cycle (the 2026-07-13
+  # expired-pause loop). pause_state_class now keeps a still-declared pause out of
+  # this path entirely, and preserving the throttle is the belt-and-suspenders.
+  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
   wake "stale: $win"
 }
 
@@ -722,7 +772,10 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    # Hash the capture with animated footer chrome stripped so a redrawing
+    # sparkline/spinner on an otherwise-idle pane cannot defeat the stale dedupe;
+    # tail40 itself stays raw for window_is_busy below (see strip_animated_chrome).
+    h=$(printf '%s' "$tail40" | strip_animated_chrome | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -807,7 +860,14 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(crew_absorb_class "$task")" in
+            # Route through pause_state_class, not crew_absorb_class, so a crew
+            # whose status still DECLARES a pause keeps a transient/uncertain
+            # `none` verdict as a throttled paused recheck (never a surface). For
+            # a crew that is NOT declaring a pause the two agree exactly, so the
+            # ordinary stopped-crew surface is unchanged; only a declared pause is
+            # steered away from surface_nonterminal_stale here as in the
+            # repeat-sight path below.
+            case "$(pause_state_class "$w" "$task")" in
               working)
                 clear_pause_tracking "$w"
                 printf '%s' "$h" > "$sf"

@@ -784,6 +784,117 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
 }
 
+# --- bug 1: an expired declared pause rechecks ONCE per window, never loops -----
+# The 2026-07-13 wake loop: a forgotten pause past its window rechecked on nearly
+# every watcher cycle (observed at pause ages 3604/4202/4469/4598s - four rechecks
+# in ~17 minutes) until the crew re-declared. Two faults compounded: surface_non
+# terminal_stale wiped the .paused-resurfaced-<key> throttle when it fired, and a
+# still-declared-paused crew whose authoritative verdict flickered to `none` (a
+# bounded no-mistakes probe that timed out, a mis-attributed stale run) escaped to
+# surface_nonterminal_stale instead of the throttled paused recheck - re-firing the
+# moment the verdict read paused again. After the fix a still-declared pause
+# surfaces at most once per PAUSE_RESURFACE_SECS - only an authoritative `working`
+# cancels it - and the durable throttle survives every re-arm.
+test_expired_pause_rechecks_once_per_window_not_loop() {
+  local dir state fakebin out capture_file window key stripped_hash statusf back pid rc i surfaces
+  dir=$(make_case expired-pause-no-loop); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-forgotten"
+  printf 'idle, still holding for the upstream release' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/forgotten.meta"
+  statusf="$state/forgotten.status"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  # A forgotten pause: its declaration is well past the (test) resurface window.
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-forgotten_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # Seed the stable stale hash so the very first poll is a repeat-sight. The
+  # content is glyph-free, so the byte-exact chrome strip leaves hash_text unchanged.
+  stripped_hash=$(hash_text "idle, still holding for the upstream release")
+  printf '%s' "$stripped_hash" > "$state/.hash-$key"
+  printf '%s' "$stripped_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  # Authoritative verdict reads `none` (the flicker) while the status still declares
+  # the pause - the exact case that used to escape the throttle and loop.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · probe timed out'
+
+  surfaces=0
+  for i in 1 2 3 4; do
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 25; rc=$?
+    if [ "$rc" != 124 ]; then
+      surfaces=$((surfaces + 1))
+      grep -F "awaiting external" "$out" >/dev/null || fail "expired-pause recheck was not the throttled paused recheck: $(cat "$out")"
+      grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a wedge: $(cat "$out")"
+    fi
+  done
+  [ "$surfaces" -eq 1 ] || fail "expired declared pause surfaced $surfaces times across 4 re-arms (expected exactly 1; >1 is the recheck loop)"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the resurface throttle was wiped instead of gating the next window"
+  unset FM_FAKE_CREW_STATE
+  pass "an expired declared pause rechecks once per window and keeps its throttle even when the verdict flickers"
+}
+
+# --- bug 2: an animated footer must not defeat the stale-hash dedupe -----------
+# The 2026-07-13 idle-claude loop: a finished, quiet crew whose pane still redrew
+# its context-meter sparkline every poll produced a fresh capture hash each cycle,
+# so surface_nonterminal_stale's .stale-<key> dedupe never matched and the same
+# idle pane surfaced ~every 20s (observed dozens of times). The hash is now taken
+# over the capture with animated chrome (Block Elements / Braille) stripped, so a
+# footer-only redraw dedupes while a real body change still surfaces. Not seeded:
+# the watcher stabilizes the hash itself, so the assertion is independent of the
+# exact strip implementation (each _rearm is one supervision cycle to exit/absorb).
+test_animated_footer_does_not_defeat_stale_dedupe() {
+  local dir state fakebin out capture_file window key body frameA frameB statusf pid rc
+  dir=$(make_case animated-footer-dedupe); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-quiet"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/quiet.meta"
+  statusf="$state/quiet.status"
+  printf 'working: last note before it went quiet\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-quiet_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The crew finished and went quiet: authoritative verdict is stopped (none), so a
+  # genuine stale SHOULD surface once.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · went quiet'
+  body=$'crewmate finished its turn.\n\nThe assistant message ended. Nothing running.'
+  # Two footer frames: identical body, different sparkline glyphs (Block Elements).
+  frameA=$'\xe2\x96\x81\xe2\x96\x83\xe2\x96\x85\xe2\x96\x87'
+  frameB=$'\xe2\x96\x87\xe2\x96\x85\xe2\x96\x83\xe2\x96\x81'
+
+  _rearm() {  # runs one supervision cycle; echoes SURFACE (exit) or ABSORB (timeout)
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    local p=$! r
+    wait_for_exit "$p" 40; r=$?
+    [ "$r" = 124 ] && echo ABSORB || echo SURFACE
+  }
+
+  # Frame A: a genuinely quiet crew surfaces once.
+  printf '%s\n  %s  23%% context left\n' "$body" "$frameA" > "$capture_file"
+  [ "$(_rearm)" = SURFACE ] || fail "a genuinely quiet crew was not surfaced on first sight"
+
+  # Footer advances one frame; the conversation body is byte-identical and the crew
+  # is still quiet. This must dedupe (absorb), not re-surface the same idle pane.
+  printf '%s\n  %s  23%% context left\n' "$body" "$frameB" > "$capture_file"
+  [ "$(_rearm)" = ABSORB ] || fail "a footer-only sparkline redraw defeated the stale dedupe and re-surfaced an idle pane"
+
+  # A MEANINGFUL body change on the same quiet crew must still surface - the strip
+  # must not weaken real staleness detection.
+  printf 'crewmate printed a NEW final line and then stopped.\n  %s  23%% context left\n' "$frameA" > "$capture_file"
+  [ "$(_rearm)" = SURFACE ] || fail "a real content change was masked by chrome normalization"
+  unset FM_FAKE_CREW_STATE
+  pass "an animated footer dedupes as stale while a real content change still surfaces"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -1122,6 +1233,8 @@ test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
+test_expired_pause_rechecks_once_per_window_not_loop
+test_animated_footer_does_not_defeat_stale_dedupe
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
