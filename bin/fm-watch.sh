@@ -190,9 +190,19 @@ hash_pane() {
 # every other byte including blank lines and the presence or absence of a trailing
 # newline, so a glyph-free capture hashes identically to the old raw path. (BSD awk
 # with RS="\0" instead enters paragraph mode - splitting on blank lines and
-# dropping the trailing newline - which breaks that byte-exact invariant.)
+# dropping the trailing newline - which breaks that byte-exact invariant.) The strip
+# is a best-effort optimization gated on perl (like fm-crew-state.sh and
+# fm-bearings-snapshot.sh); when perl is absent the capture passes through raw so
+# staleness detection degrades to the pre-strip raw-hash behavior - still fully
+# functional, just without animation dedupe - rather than a swallowed missing-perl
+# exit 127 (the script sets only set -u, no pipefail) making hash_pane hash empty
+# input every poll and silently defeating stale detection.
 strip_animated_chrome() {
-  LC_ALL=C perl -0777 -pe 's/\xe2\x96[\x80-\x9f]//g; s/\xe2[\xa0-\xa3][\x80-\xbf]//g'
+  if command -v perl >/dev/null 2>&1; then
+    LC_ALL=C perl -0777 -pe 's/\xe2\x96[\x80-\x9f]//g; s/\xe2[\xa0-\xa3][\x80-\xbf]//g'
+  else
+    cat
+  fi
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
