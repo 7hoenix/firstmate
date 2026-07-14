@@ -863,7 +863,7 @@ test_animated_footer_does_not_defeat_stale_dedupe() {
   # The crew finished and went quiet: authoritative verdict is stopped (none), so a
   # genuine stale SHOULD surface once.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · went quiet'
-  body=$'crewmate finished its turn.\nThe assistant message ended. Nothing running.'
+  body=$'crewmate finished its turn.\n\nThe assistant message ended. Nothing running.'
   # Two footer frames: identical body, different sparkline glyphs (Block Elements).
   frameA=$'\xe2\x96\x81\xe2\x96\x83\xe2\x96\x85\xe2\x96\x87'
   frameB=$'\xe2\x96\x87\xe2\x96\x85\xe2\x96\x83\xe2\x96\x81'

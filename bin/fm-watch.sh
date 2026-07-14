@@ -185,12 +185,14 @@ hash_pane() {
 # locale-independent and identical for the tmux and herdr capture paths (both
 # feed fm_backend_capture plain text). This normalizes ONLY the hash input; the
 # raw tail40 still drives window_is_busy, whose BUSY_REGEX lives in the same
-# footer, so real work still suppresses stale detection. Reads the whole capture
-# as one record (RS="\0", captures never contain NUL) and prints it back
-# byte-for-byte minus the target glyphs - it adds no trailing newline and touches
-# no other byte, so a glyph-free capture hashes identically to the old raw path.
+# footer, so real work still suppresses stale detection. perl -0777 slurps the
+# entire capture and substitutes only the target glyph byte-sequences, preserving
+# every other byte including blank lines and the presence or absence of a trailing
+# newline, so a glyph-free capture hashes identically to the old raw path. (BSD awk
+# with RS="\0" instead enters paragraph mode - splitting on blank lines and
+# dropping the trailing newline - which breaks that byte-exact invariant.)
 strip_animated_chrome() {
-  LC_ALL=C awk 'BEGIN{RS="\0"} { gsub(/\342\226[\200-\237]/, ""); gsub(/\342[\240-\243][\200-\277]/, ""); printf "%s", $0 }'
+  LC_ALL=C perl -0777 -pe 's/\xe2\x96[\x80-\x9f]//g; s/\xe2[\xa0-\xa3][\x80-\xbf]//g'
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
