@@ -403,9 +403,11 @@ test_watch_restart_rejects_reused_pid() {
   # the lock now names that child, not the arm invocation. The property is the
   # same: the stale reused-pid lock is replaced by a genuinely live watcher, which
   # the arm confirms before reporting it. Wait for that confirmation, not just for
-  # the lock pid to appear (identity and beacon land a beat later).
+  # the lock pid to appear (identity and beacon land a beat later). The budget must
+  # exceed the arm's FM_ARM_CONFIRM_TIMEOUT (default 10s) so a fresh child that is
+  # slow to start and claim the lock under load is still observed, not read empty.
   i=0
-  while [ "$i" -lt 80 ]; do
+  while [ "$i" -lt 200 ]; do
     grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
