@@ -13,9 +13,10 @@
 # empirical verification): ONE zellij session (default name "firstmate",
 # overridable via FM_ZELLIJ_SESSION for test isolation - mirrors herdr's
 # HERDR_SESSION), ONE tab per task, with caller-facing label "fm-<id>" and a
-# home-scoped actual title. No per-home workspace split (unlike herdr's later
-# P3 refinement): zellij has no workspace concept, only sessions/tabs/panes,
-# so this stays exactly the report's original choice. Target string shape:
+# home-scoped actual title. No per-task workspace split (unlike herdr, which
+# gives each task its own workspace): zellij has no workspace concept, only
+# sessions/tabs/panes, so this stays exactly the report's original choice.
+# Target string shape:
 # "<zellij-session>:<pane-id>" (pane id is a bare non-negative integer with no
 # embedded colon, so splitting on the FIRST colon is trivially correct and
 # mirrors herdr's target-string convention).

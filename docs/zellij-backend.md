@@ -9,7 +9,7 @@ All real-zellij verification in this document and in `tests/fm-backend-zellij-sm
 
 ## Setup
 
-Pick zellij if you already use it as your terminal multiplexer and want firstmate crew windows there instead of tmux; it has no per-home container split, so it is simpler than herdr for a single-home fleet.
+Pick zellij if you already use it as your terminal multiplexer and want firstmate crew windows there instead of tmux; it shares one tab bar for all tasks rather than giving each its own workspace, so it is simpler than herdr for a single-home fleet.
 
 Prerequisites:
 
@@ -31,7 +31,7 @@ You do not need to attach for routine supervision: from an active firstmate sess
 
 Verify it works by spawning a trivial task with `--backend zellij` and confirming the task's meta records `backend=zellij` plus `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`; attaching to the session should show the new home-scoped tab title, such as `fm-firstmate-<8hex>-<id>`.
 
-Limitations: zellij is experimental, has no per-home workspace split (all tasks share one tab bar, unlike herdr), has no verified agent-process liveness classifier for the session-start secondmate sweep, and still carries the known gaps documented below (no native busy-state signal and a narrow focus-steal race on tab creation) - see "Known gaps left for a follow-up" at the end of this document.
+Limitations: zellij is experimental, has no per-task workspace split (all tasks share one tab bar, unlike herdr's workspace per task), has no verified agent-process liveness classifier for the session-start secondmate sweep, and still carries the known gaps documented below (no native busy-state signal and a narrow focus-steal race on tab creation) - see "Known gaps left for a follow-up" at the end of this document.
 
 ## Status: experimental
 
@@ -49,7 +49,7 @@ Treehouse remains the worktree provider, exactly as it is for tmux and herdr.
 ## Task container shape: one session, one tab per task
 
 Per the design report's "Zellij implementation choices" #1, unchanged by empirical verification: firstmate uses **one** zellij session (default name `firstmate`, overridable via `FM_ZELLIJ_SESSION` for test isolation - mirrors herdr's `HERDR_SESSION`) and **one tab per task**, whose caller-facing label is `fm-<id>` (its actual, home-scoped tab title is described in "Home-scoped tab titles" below).
-This is deliberately simpler than herdr's later workspace-per-firstmate-home refinement (`docs/herdr-backend.md` "Task container shape"): zellij has no workspace concept at all, only sessions/tabs/panes, so there is no analogous per-home container to split - primary and secondmate tasks share the one `firstmate` session's tab bar, distinguished only by their tab titles, exactly as the original P1/P2 tmux-parity shape worked before herdr's per-home split existed.
+This is deliberately simpler than herdr's workspace-per-task shape (`docs/herdr-backend.md` "Task container shape"): zellij has no workspace concept at all, only sessions/tabs/panes, so there is no analogous per-task container to give each worker - primary and secondmate tasks share the one `firstmate` session's tab bar, distinguished only by their tab titles, exactly as the original P1/P2 tmux-parity shape worked.
 No empirical evidence surfaced during verification that forces a different container shape; the report's original choice stands - only the tab TITLE gained a per-home discriminator, not the container.
 
 ## Home-scoped tab titles (cross-home collision fix)
@@ -220,5 +220,5 @@ The isolated zellij session and the scratch `FM_HOME`/project were fully torn do
 - **The focus-steal mitigation has a narrow race window.** Between `new-tab` (which steals focus immediately) and the follow-up `go-to-tab-by-id` restore call, an attached client's view is briefly on the new tab. No flag-based suppression exists to close this window entirely (see "Focus-steal on new-tab" above); a future zellij release may add one.
 - **A pane can still die after `target_ready` succeeds and before the operation runs.** Metadata-routed operations now verify the expected caller-facing `fm-<id>` label through the home-scoped-title or unambiguous legacy-title check, as well as the pane id up front, but zellij's unconditional exit 0 still leaves this narrow time-of-check/time-of-use race for one-shot operations (see "Unconditional exit code 0" above).
 - **The `pwd`-probe workaround for worktree-path discovery is scoped to `fm-spawn.sh`'s own poll loop only** (see "Worktree-path discovery" above). It is not a general-purpose live-cwd primitive; a future caller needing a live cwd read for a zellij pane outside that narrow spawn-time context would need the same active-probe approach, not a passive JSON field.
-- **No per-home container split**, unlike herdr's later P3 refinement (`docs/herdr-backend.md` "Task container shape"). This is a deliberate simplicity choice per the locked captain decision (D2: "zellij, content unchanged from the report"), not an oversight; if a captain later runs many concurrent secondmates on the zellij backend and wants per-home visual separation in the tab bar, that would be a natural follow-up mirroring herdr's workspace-per-home pass. Note this is a CONTAINER-level (visual tab-bar grouping) gap only - the cross-home NAME-collision gap this shared container shape used to carry (two homes' same-id tabs sending/peeking/closing each other) is closed by home-scoped tab titles, "Home-scoped tab titles" above.
+- **No per-task container split**, unlike herdr's workspace-per-task shape (`docs/herdr-backend.md` "Task container shape"). This is a deliberate simplicity choice per the locked captain decision (D2: "zellij, content unchanged from the report"), not an oversight; if a captain later wants each worker in its own visual container on the zellij backend, that would be a natural follow-up mirroring herdr's workspace-per-task pass. Note this is a CONTAINER-level (visual tab-bar grouping) gap only - the cross-home NAME-collision gap this shared container shape used to carry (two homes' same-id tabs sending/peeking/closing each other) is closed by home-scoped tab titles, "Home-scoped tab titles" above.
 - **The untagged-legacy migration fallback has one residual ambiguity gap.** `fm_backend_zellij_tab_matches_label`'s bare-title fallback (for a tab spawned before home-scoping shipped) refuses rather than guesses when 2+ live tabs share the exact same untagged bare title - but a genuinely ambiguous case then requires manual intervention (tear down and respawn to get a new home-scoped title) rather than an automatic resolution. This is accepted as the honest trade for not needing a one-time re-tagging migration step; see "Home-scoped tab titles" above.

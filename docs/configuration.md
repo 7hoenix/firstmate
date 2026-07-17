@@ -52,8 +52,8 @@ A metadata-routed selector returns the recorded backend target (`terminal=` for 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and uses the same recorded backend target fields after loading `state/<id>.meta`.
-Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
-Spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
+Herdr uses one workspace per task, labeled from the task id and `FM_HOME`: a primary-home task uses `fm-<id>`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>-fm-<id>`.
+Spawn, list-live, recovery, and teardown-reap paths derive that label from the active home, so a secondmate's own crewmates stay inside their own clearly-labeled herdr spaces; see [`docs/herdr-backend.md`](herdr-backend.md) for the full workspace-per-task shape.
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
 For normal zellij operations, `FM_ZELLIJ_SESSION` selects the named session and defaults to `firstmate`.
