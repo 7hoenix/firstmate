@@ -1032,6 +1032,11 @@ fi
 
 if [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  # P4 (herdr workspace-per-task): after killing the task's pane, close its own
+  # now-empty per-task workspace. No-op for every other backend, and for herdr
+  # it never closes the legacy shared per-home workspace or one holding other
+  # work (fm_backend_herdr_reap_owned_workspace's ownership + emptiness gates).
+  fm_backend_reap_workspace "$BACKEND" "$T" "$(meta_value "$META" herdr_workspace_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT

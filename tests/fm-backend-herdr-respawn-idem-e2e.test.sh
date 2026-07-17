@@ -65,13 +65,16 @@ fm_backend_herdr_version_check || fail "version_check failed against the real in
 # fm_backend_herdr_create_task is the ONE function both bin/fm-spawn.sh's
 # ordinary crewmate/scout path and its --secondmate path call, so exercising
 # it directly here covers both paths identically - already proven distinct
-# only in FM_HOME-shadowing (tests/fm-backend-herdr-workspace-per-home-e2e.test.sh),
+# only in FM_HOME-shadowing (tests/fm-backend-herdr-workspace-per-task-e2e.test.sh),
 # never in this duplicate-guard logic, which has no home-specific branching.
+# This drives the create_task husk/dup guard directly, so both task tabs are
+# created in ONE workspace (a primitive-level test artifact - the per-task
+# workspace shape is covered by the workspace-per-task e2e test).
 
 PROJ_CWD="$SCRATCH/proj"
 mkdir -p "$PROJ_CWD"
 
-RAW=$(fm_backend_herdr_container_ensure "$PROJ_CWD") || fail "container_ensure failed"
+RAW=$(fm_backend_herdr_container_ensure "$PROJ_CWD" fm-respawn-crew1) || fail "container_ensure failed"
 CONTAINER=${RAW%%$'\t'*}
 SEEDED_TAB_ID=${RAW#*$'\t'}
 WSID=${CONTAINER#*:}
