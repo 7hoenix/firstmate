@@ -879,6 +879,18 @@ if ! disable_worktree_commit_signing "$WT"; then
   echo "warning: could not disable commit signing in $WT; autonomous commits may block on an interactive signer" >&2
 fi
 
+# Harden the no-mistakes INTERNAL clone the same way, if this project is gated by one.
+# fm-sign-lib above only reaches the task worktree; the pipeline commits and pushes in
+# ~/.no-mistakes/repos/<hash>.git, which still inherits the operator's global signing
+# and any global HTTPS->SSH insteadOf rewrite. This scopes commit.gpgsign=false plus,
+# when needed, the username-form-URL + gh credential-helper dodge to that internal clone
+# only (fm-nm-clone-config.sh). A no-op for non-no-mistakes projects and clean machines.
+# The internal clone can also be (re)created mid-run after spawn, so ship briefs re-run
+# this right before validation; both applications are idempotent.
+if ! "$SCRIPT_DIR/fm-nm-clone-config.sh" "$WT"; then
+  echo "warning: could not fully harden the no-mistakes internal clone for $WT; the validation pipeline may block on an interactive signer or credential prompt" >&2
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside

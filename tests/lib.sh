@@ -34,6 +34,19 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Isolate fixture git operations from the host's global/system git config so
+# fixture commits never inherit the operator's unattended-hostile settings -
+# above all commit.gpgsign=true backed by a GUI/1Password signer, which hangs or
+# fails ("failed to write commit object") every fixture commit in a
+# non-interactive run, and a global url.<ssh>.insteadOf rewrite. This is the same
+# host-independence the git-identity/fixture helpers already intend. Suites that
+# must exercise a specific git config (the signing suites) re-export
+# GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM themselves after sourcing this library,
+# which naturally overrides these defaults.
+: "${GIT_CONFIG_GLOBAL:=/dev/null}"
+: "${GIT_CONFIG_SYSTEM:=/dev/null}"
+export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
