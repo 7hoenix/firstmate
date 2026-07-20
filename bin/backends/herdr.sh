@@ -736,9 +736,34 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # as do ❯/›) would false-match the whole-row byte prefix; ^❯|^› matches only the
 # exact multibyte sequences.
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^❯|^›'}
+# Claude's "queued for after this turn" composer placeholder, matched on the
+# PLAIN (styling-independent) composer row. When one or more mid-turn messages
+# are accepted while claude is busy, claude renders each DELIVERED message as a
+# `❯`-prefixed "queued" indicator row ABOVE the composer, and the composer
+# itself returns to EMPTY, showing this placeholder hint. The presence of this
+# hint is therefore a definitive "composer empty, the typed message was accepted
+# (queued/submitted)" signal - see fm_backend_herdr_composer_state and
+# docs/herdr-backend.md "Incident (2026-07-13)". Requiring the leading agent
+# prompt glyph (an exact-multibyte-sequence alternation, NOT a byte class - the
+# same C/POSIX-locale hazard the bare-prompt RE above documents) AND the exact
+# hint phrase anchored at end-of-row keeps it matching ONLY the composer's own
+# placeholder, never a delivered message's text or an incidental scrollback
+# mention. Between the glyph and the phrase we allow only a run of
+# non-alphanumeric characters ([^A-Za-z0-9]*), NOT an unbounded `.*`: this still
+# tolerates claude's glyph-to-text separator, which is rendered as a NO-BREAK
+# SPACE (U+00A0), not an ASCII space (verified live 2026-07-13, so a literal-space
+# pattern would silently never match), while refusing any row whose real typed
+# text precedes the phrase. The earlier unbounded `.*` was unsafe: a genuinely
+# UNSUBMITTED message that merely ends with "Press up to edit queued messages"
+# would false-match, and composer_state would report it empty (submitted) - a
+# silently lost message, the more dangerous direction than a false send-fail.
+# Real message text always contains word characters, so the separator-only class
+# excludes it. "messages?" tolerates a future singular form; the observed live
+# wording is always plural.
+FM_BACKEND_HERDR_QUEUED_HINT_RE=${FM_BACKEND_HERDR_QUEUED_HINT_RE:-'^❯[^A-Za-z0-9]*Press up to edit queued messages?$|^›[^A-Za-z0-9]*Press up to edit queued messages?$'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped queued=0
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
@@ -750,6 +775,16 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
+    # claude queued-message state: if the composer's own row is the "Press up to
+    # edit queued messages" placeholder, the typed mid-turn message has landed
+    # (queued for after the current turn) and the composer is empty, regardless
+    # of whether this build renders the placeholder dim. Recognize it on the
+    # PLAIN row so the verdict never depends on incidental de-emphasis styling
+    # (the 2026-07-13 false-send-fail: a non-dim build read this exact row as
+    # unsubmitted 'pending' text - docs/herdr-backend.md "Incident (2026-07-13)").
+    if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_QUEUED_HINT_RE"; then
+      queued=1
+    fi
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
         shape=bordered
@@ -765,6 +800,12 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         ;;
     esac
   done < <(printf '%s\n' "$cap")
+  # claude's queued-message placeholder was seen: the composer is empty and the
+  # delivered message is queued (submitted), so report empty before any content
+  # classification. Safe because that placeholder is claude's EMPTY-composer hint
+  # and is replaced the instant a human types real input (verified live), so this
+  # never masks genuinely unsubmitted composer text.
+  [ "$queued" -eq 1 ] && { printf 'empty'; return 0; }
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
