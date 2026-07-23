@@ -9,6 +9,11 @@
 #   - every other off-default state is left untouched and reported as a loud,
 #     quantified "STUCK: ... N commits behind ... - needs attention" warning
 #     instead of a quiet skip.
+#   - cleanliness counts tracked files only: an untracked-only clone still
+#     fast-forwards (and keeps the untracked file), a real tracked change still
+#     STUCKs even alongside an untracked file, and an incoming commit that would
+#     overwrite a local untracked file is reported STUCK with git's own reason
+#     without ever clobbering the file.
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
@@ -274,6 +279,65 @@ test_dirty_is_stuck_untouched() {
   [ "$(head_sha "$clone")" = "$before" ] || fail "dirty clone HEAD was moved"
   grep -q "uncommitted edit" "$clone/file.txt" || fail "dirty working-tree change was discarded"
   pass "dirty working tree is reported STUCK and left untouched"
+}
+
+test_untracked_only_on_default_fast_forwards() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" untracked-ok)
+  advance_origin "$home" untracked-ok C1
+  # An intentional dropped-in file (like the per-clone worktree-pool config) that is
+  # untracked only. It must not masquerade as unlanded work and block the sync.
+  printf 'pool=1\n' > "$clone/treehouse.toml"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "untracked-ok: synced" "untracked-only clone still fast-forwards"
+  assert_not_contains "$out" "STUCK" "an untracked-only clone is never flagged STUCK"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "untracked-only clone was not fast-forwarded"
+  [ -f "$clone/treehouse.toml" ] || fail "untracked file was destroyed by the sync"
+  pass "untracked-only working tree fast-forwards and preserves the untracked file"
+}
+
+test_tracked_change_with_untracked_still_stuck() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" mixed-dirty)
+  advance_origin "$home" mixed-dirty C1
+  before=$(head_sha "$clone")
+  printf 'edit\n' >> "$clone/file.txt"          # a real tracked modification
+  printf 'pool=1\n' > "$clone/treehouse.toml"   # plus an untracked file
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "mixed-dirty: STUCK:" "a real tracked change still reports STUCK"
+  assert_contains "$out" "uncommitted changes" "STUCK still names the dirty state"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "dirty clone HEAD was moved"
+  grep -q edit "$clone/file.txt" || fail "tracked change was discarded"
+  pass "a tracked change still blocks the fast-forward even alongside an untracked file"
+}
+
+test_untracked_overwrite_conflict_is_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" clash)
+  # Origin advances by committing a TRACKED file at treehouse.toml, while the clone
+  # holds an untracked file at that same path with different content.
+  commit_file "$home/work-clash" treehouse.toml "tracked=upstream" "add tracked treehouse.toml"
+  git -C "$home/work-clash" push -q origin main
+  printf 'local=untracked\n' > "$clone/treehouse.toml"
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "clash: STUCK:" "an untracked-overwrite conflict is reported STUCK"
+  assert_contains "$out" "untracked working tree files would be overwritten" \
+    "STUCK carries git's own refusal reason"
+  assert_contains "$out" "commits behind origin/main" "conflict STUCK is quantified"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "clone was advanced despite the untracked conflict"
+  grep -q 'local=untracked' "$clone/treehouse.toml" || fail "local untracked file was clobbered"
+  pass "an untracked file an incoming commit would overwrite is reported STUCK and never clobbered"
 }
 
 test_non_default_branch_is_stuck_untouched() {
@@ -607,6 +671,9 @@ test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
+test_untracked_only_on_default_fast_forwards
+test_tracked_change_with_untracked_still_stuck
+test_untracked_overwrite_conflict_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards

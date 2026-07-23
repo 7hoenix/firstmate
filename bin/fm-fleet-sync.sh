@@ -11,6 +11,13 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
+# "Clean"/"dirty" here counts tracked files only: staged or unstaged changes to
+# tracked files block a fast-forward, but untracked files alone never do (an
+# intentional dropped-in file like the worktree-pool config each clone carries must
+# not masquerade as unlanded work). If an incoming commit would overwrite a local
+# untracked file, the ff-only merge (or recovery checkout) refuses on its own; that
+# refusal is reported as a STUCK carrying git's reason, and the local file is never
+# deleted or clobbered.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -282,11 +289,17 @@ stuck_state() {
 
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
 # how far behind origin/<default> it is, so a chronically-stuck clone is visibly
-# distinct from a benign one-off skip.
+# distinct from a benign one-off skip. An optional second argument appends git's
+# own refusal reason (e.g. the untracked-overwrite conflict that blocks a
+# fast-forward) so the operator sees exactly why it is stuck.
 report_stuck() {
-  local state=$1 behind
+  local state=$1 reason=${2:-} behind
   behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
-  echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
+  if [ -n "$reason" ]; then
+    echo "$label: STUCK: on $state, $behind commits behind $BASE ($reason) - needs attention"
+  else
+    echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
+  fi
 }
 
 sync_project() {
@@ -334,8 +347,14 @@ sync_project() {
   fi
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  # "Dirty" means tracked-file changes only (staged or unstaged); untracked files
+  # alone never block a fast-forward. --untracked-files=no makes git omit the "??"
+  # lines so an intentional dropped-in file (e.g. the worktree-pool config each
+  # clone carries) does not masquerade as unlanded work. If an incoming commit would
+  # overwrite such an untracked file, the ff-only merge below refuses on its own and
+  # that is reported as STUCK - the local file is never deleted or clobbered.
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  [ -z "$(git -C "$PROJ" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
@@ -351,8 +370,15 @@ sync_project() {
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
-      if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
-        report_stuck "$(stuck_state)"
+      if ! checkout_output=$(git -C "$PROJ" checkout --quiet "$DEFAULT" 2>&1); then
+        # Same untracked-overwrite guard as the fast-forward path: if re-attaching
+        # would clobber a local untracked file, git refuses and we report that reason
+        # rather than silently losing it. The file is never touched.
+        if printf '%s\n' "$checkout_output" | grep -q "untracked working tree files would be overwritten"; then
+          report_stuck "$(stuck_state)" "$(first_line "$checkout_output")"
+        else
+          report_stuck "$(stuck_state)"
+        fi
         return 0
       fi
       recovered=yes
@@ -398,6 +424,14 @@ sync_project() {
     return 0
   }
   if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
+    # A local untracked file whose path an incoming commit now tracks makes git
+    # refuse the fast-forward ("untracked working tree files would be overwritten").
+    # We never pre-delete or clobber it: git's own refusal protects the file. Surface
+    # it as a loud STUCK carrying git's reason so it gets attention, not a quiet skip.
+    if printf '%s\n' "$merge_output" | grep -q "untracked working tree files would be overwritten"; then
+      report_stuck "branch $DEFAULT" "$(first_line "$merge_output")"
+      return 0
+    fi
     reason="fast-forward failed"
     if [ -n "$merge_output" ]; then
       reason="$reason: $(first_line "$merge_output")"
