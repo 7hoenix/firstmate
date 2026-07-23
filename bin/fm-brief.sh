@@ -44,6 +44,21 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship briefs also carry a commit-style contract (short imperative subject, a few
+# plain body lines of what/why, no process-narration or validation-transcript
+# essays; the long story lives in the PR description). This is the single owner of
+# that contract; firstmate-coding-guidelines cross-references it for firstmate-repo
+# commits. Scope boundary, documented honestly rather than overstated: the contract
+# governs only the commits the crewmate authors. It cannot reshape (a) the
+# no-mistakes pipeline's own `no-mistakes(...)` gate-fix commits or the PR body it
+# generates, nor (b) what a squash merge lands on the default branch - the koodos
+# repos configure GitHub's squash default to "PR title and description", so the
+# landed commit body is a verbatim copy of the (deliberately lengthy) PR body, not
+# the crewmate's branch commits. Short branch commits therefore improve the PR
+# Commits tab, non-squash/rebase/local-only landings, and review readability; the
+# PR title still becomes the squash subject. Making the landed squash *body* short
+# on those repos is a repo-settings change (squash default -> "PR title only"),
+# outside this scaffold's reach.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -364,6 +379,16 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+# Commit style
+Keep commit messages SHORT. The lengthy story belongs in the PR description, never in the commit.
+- Subject: one imperative line in conventional-commit shape (\`fix(api): ...\`, \`feat: ...\`, \`chore(db): ...\`), aim for <=72 chars (a leading \`KOO-####\` ticket ref does not count against that budget), no trailing period.
+- Body: at most a few plain lines stating WHAT changed and the essential WHY. A small, self-evident change often needs no body at all.
+- Keep OUT of every commit: process narration ("after three attempts"), validation or test/CI transcripts, risk-assessment essays, and agent bookkeeping. That is \`git log\` noise; put it in the PR description instead, which stays written for teammates.
+Calibrate against these before/after pairs:
+- Subject. BAD: \`fix: after a failed rebase, finally hide gated apps via a host filter per the brief\` GOOD: \`fix(api): hide platform-gated micro-apps from Android directory\`
+- Body. BAD: a multi-paragraph \`## Intent / ## What I built / ## Testing\` essay narrating the whole session. GOOD, two plain lines: \`Android users could launch platform-gated micro-apps and hit broken runs.\` then \`Add a host-based directory filter that hides gated apps from Android; iOS/web unaffected.\`
+This contract governs the commits YOU author. It does not reach commits or PR text the no-mistakes pipeline generates itself (its own \`no-mistakes(...)\` gate-fix commits and the PR description it writes); those are outside your control.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

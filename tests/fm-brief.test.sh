@@ -100,6 +100,39 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The commit-style contract must ride on every ship-mode brief (it is placed in
+# the shared ship heredoc, not a mode branch) and must NOT appear on scout briefs,
+# which produce a report and no commits.
+test_commit_style_contract_on_ship_not_scout() {
+  local home id brief status
+  home="$TMP_ROOT/commit-style-home"
+  write_registry "$home"
+
+  for id_proj in "commit-nomistakes-e1:no-registry-proj" "commit-directpr-e2:direct-proj" "commit-localonly-e3:local-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
+    expect_code 0 "$status" "fm-brief.sh $id $proj should exit 0"
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Commit style" "$brief" \
+      "$id: ship brief missing the commit-style section"
+    assert_grep "Keep commit messages SHORT." "$brief" \
+      "$id: commit-style contract lost its short-commit mandate"
+    assert_grep "The lengthy story belongs in the PR description" "$brief" \
+      "$id: commit-style contract lost the story-goes-in-PR routing"
+    assert_grep "It does not reach commits or PR text the no-mistakes pipeline generates" "$brief" \
+      "$id: commit-style contract lost the honest pipeline-scope boundary"
+  done
+
+  id="commit-scout-e4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh scout should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Commit style" "$brief" \
+    "scout brief must not carry the commit-style contract (no commits)"
+  pass "fm-brief.sh: commit-style contract rides ship briefs and skips scout briefs"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -265,6 +298,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_commit_style_contract_on_ship_not_scout
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
