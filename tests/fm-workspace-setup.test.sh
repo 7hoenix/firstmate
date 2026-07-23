@@ -253,6 +253,10 @@ write_config "$TMP_ROOT/dup.json" '{ "a": { "steps": [ { "name": "x", "run": "1"
 out=$("$HELPER" validate --config "$TMP_ROOT/dup.json")
 assert_contains "$out" "step names must be unique within a project" "duplicate step names flagged"
 
+write_config "$TMP_ROOT/badenabled.json" '{ "a": { "steps": [ { "name": "x", "run": "y", "enabled": "false" } ] } }'
+out=$("$HELPER" validate --config "$TMP_ROOT/badenabled.json")
+assert_contains "$out" "enabled must be a boolean" "non-boolean enabled flagged"
+
 out=$("$HELPER" validate --config "$TMP_ROOT/absent.json"); rc=$?
 expect_code 0 "$rc" "absent config validate exits 0"
 [ -z "$out" ] || fail "absent config validate must be silent, got: $out"

@@ -168,6 +168,12 @@ cmd_validate() {
       then "fingerprint entries must be strings"
     elif [projects[] | .value.steps[]? | select((.env? != null) and ((.env | type) != "object"))] | length > 0
       then "env must be an object"
+    elif [projects[] | .value.steps[]? | select((.enabled? != null) and ((.enabled | type) != "boolean"))] | length > 0
+      then "enabled must be a boolean"
+    elif [projects[] | .value.steps[]? | select((.optional? != null) and ((.optional | type) != "boolean"))] | length > 0
+      then "optional must be a boolean"
+    elif [projects[] | .value.steps[]? | select((.mise? != null) and ((.mise | type) != "boolean"))] | length > 0
+      then "mise must be a boolean"
     elif [projects[] | .value.steps as $s | select(($s | map(.name) | length) != ($s | map(.name) | unique | length))] | length > 0
       then "step names must be unique within a project"
     else empty
