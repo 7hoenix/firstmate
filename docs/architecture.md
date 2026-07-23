@@ -85,6 +85,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Because a pooled worktree is normally re-leased rather than freshly built, its installed toolchain, dependencies, and secrets drift stale against the moving default branch; `fm-spawn.sh` closes that gap by running per-project workspace setup (`bin/fm-workspace-setup.sh`, driven by `config/workspace-setup.json`) after the worktree is final, idempotently on both fresh creation and re-lease ([`docs/workspace-setup.md`](workspace-setup.md)).
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
@@ -150,6 +151,7 @@ An explicit per-spawn harness or raw launch command does not inherit model or ef
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 `config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces routine backlog updates to hand-editing across the fleet without disabling validated handoff delegation.
+`config/workspace-setup.json` is inherited too; a secondmate's own crewmate worktrees come up with the same per-project toolchain, dependency, and secrets setup.
 
 The `data/secondmates.md` line schema and the secondmate environment variables are documented in [configuration.md](configuration.md).
 

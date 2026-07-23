@@ -98,6 +98,7 @@ state/               volatile runtime signals; gitignored
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
+  <id>.setup.log     per-task workspace-setup output written by fm-spawn via fm-workspace-setup.sh; removed by teardown (docs/workspace-setup.md)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context (platform/budget), keyed by request_id; survives inbox cleanup so a delayed follow-up recovers the original platform (section 14; bin/fm-x-lib.sh)
@@ -222,7 +223,7 @@ An explicit per-spawn harness still overrides either kind, and every secondmate 
 
 `config/secondmate-harness` can also pin a model/effort for the secondmate agent in one line (`<harness> [<model>] [<effort>]`); format, accessors, and inheritance exceptions live in `secondmate-provisioning` (load before creating/seeding/launching/recovering a secondmate).
 
-`config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited into every secondmate home; `config/secondmate-harness` is not, because secondmates never spawn secondmates.
+`config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and `config/workspace-setup.json` are inherited into every secondmate home; `config/secondmate-harness` is not, because secondmates never spawn secondmates.
 `secondmate-provisioning` owns the propagation timing, mechanism, the literal-file inheritance nuance, and `bin/fm-config-push.sh`.
 
 Each adapter splits into mechanics and knowledge.
