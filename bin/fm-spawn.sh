@@ -906,7 +906,7 @@ fi
 if [ "$KIND" != secondmate ]; then
   SETUP_PROJ=$(basename "$PROJ_ABS")
   SETUP_LOG="$STATE/$ID.setup.log"
-  if ! "$SCRIPT_DIR/fm-workspace-setup.sh" run --worktree "$WT" --project "$SETUP_PROJ" --log "$SETUP_LOG"; then
+  if ! "$SCRIPT_DIR/fm-workspace-setup.sh" run --worktree "$WT" --project "$SETUP_PROJ" --log "$SETUP_LOG" --config "$CONFIG/workspace-setup.json"; then
     echo "warning: workspace setup for $SETUP_PROJ reported errors; the worktree is usable but its toolchain, deps, or secrets may be incomplete - see $SETUP_LOG" >&2
   fi
 fi

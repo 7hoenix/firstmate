@@ -202,12 +202,14 @@ cmd_validate() {
 # the absolute git dir so the path is correct regardless of this script's cwd, and
 # resolves to the per-worktree git dir for a linked worktree.
 git_exclude_marker() {
-  local wt=$1 gitdir excl
+  local wt=$1 gitdir excl pat
   gitdir=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null || true)
   [ -n "$gitdir" ] || return 0
   excl="$gitdir/info/exclude"
   mkdir -p "$gitdir/info" 2>/dev/null || return 0
-  grep -qxF "$MARKER_NAME" "$excl" 2>/dev/null || printf '%s\n' "$MARKER_NAME" >> "$excl"
+  for pat in "$MARKER_NAME" ".fm-wss-marker.*"; do
+    grep -qxF "$pat" "$excl" 2>/dev/null || printf '%s\n' "$pat" >> "$excl"
+  done
 }
 
 cmd_run() {
@@ -347,7 +349,7 @@ cmd_run() {
       else
         bash -c "$run"
       fi
-    ) >>"${log:-/dev/null}" 2>&1
+    ) >>"${log:-/dev/null}" 2>&1 </dev/null
     rc=$?
 
     # Rewrite this step's record (last line for $name) with the new result.
