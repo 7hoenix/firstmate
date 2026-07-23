@@ -1,0 +1,56 @@
+{
+  "_comment": "Example config/workspace-setup.json. Copy to config/workspace-setup.json (LOCAL, gitignored) and edit for THIS fleet's projects. Keys are project names as they appear under projects/. A project with no entry is left exactly as-is (no setup runs). Schema and semantics: docs/workspace-setup.md. Keys starting with _ are ignored.",
+
+  "shelf": {
+    "steps": [
+      {
+        "name": "mise",
+        "run": "mise install",
+        "phase": "both",
+        "fingerprint": [".tool-versions"]
+      },
+      {
+        "name": "deps",
+        "run": "pnpm install --frozen-lockfile",
+        "phase": "both",
+        "fingerprint": ["pnpm-lock.yaml"]
+      },
+      {
+        "name": "secrets",
+        "_comment": "shelf has NO `secrets` script in package.json. Its Next.js env is pulled with `pnpm pull-env` (npx vercel env pull, needs Vercel auth). The warehouse/dbt .envrc is handled separately by shelf's own treehouse.toml post_create hook. Confirm the right command for this fleet before relying on it.",
+        "run": "pnpm pull-env",
+        "phase": "create"
+      }
+    ]
+  },
+
+  "insights-app": {
+    "steps": [
+      {
+        "name": "mise",
+        "run": "mise install",
+        "phase": "both",
+        "fingerprint": ["mise.toml", ".mise.toml"]
+      },
+      {
+        "name": "deps",
+        "run": "bun install",
+        "phase": "both",
+        "fingerprint": ["bun.lock", "bun.lockb", "package.json"]
+      },
+      {
+        "name": "secrets",
+        "_comment": "package.json `secrets` script = `bun run scripts/pull-secrets.ts`. Doppler-backed; `bun run secrets` alone errors without Doppler, so pass --fallback for headless worktrees without doppler auth.",
+        "run": "bun run secrets -- --fallback",
+        "phase": "create"
+      },
+      {
+        "name": "ios",
+        "_comment": "Opt-in: iOS tuist install/generate makes no sense for a headless agent worktree and needs Xcode. Flip enabled to true only on a machine set up for iOS builds.",
+        "run": "cd apps/ios/ShelfInsights && tuist install && tuist generate",
+        "phase": "create",
+        "enabled": false
+      }
+    ]
+  }
+}

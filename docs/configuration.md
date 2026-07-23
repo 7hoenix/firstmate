@@ -203,6 +203,14 @@ If no dispatch rule fits, firstmate uses the dispatch profile `default` when pre
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Workspace setup (config/workspace-setup.json)
+
+`config/workspace-setup.json` (LOCAL, gitignored, firstmate-maintained and human-editable) makes every task worktree come up with its project's toolchain, dependencies, and secrets already installed, on both fresh worktree creation and re-lease of a pooled worktree, idempotently.
+A project with no entry behaves exactly as before: setup is a silent no-op.
+The full schema, phase and fingerprint semantics, mise wrapping, failure model, and the manual verification plan for the real repos live in `docs/workspace-setup.md`; `docs/examples/workspace-setup.json` is a copyable starting point.
+Bootstrap validates the file at session start and prints a `WORKSPACE_SETUP: active` or `WORKSPACE_SETUP: invalid ...` line, handled via `bootstrap-diagnostics`.
+Secondmate homes inherit this file from the primary, so a secondmate's own crewmate worktrees get the same per-project setup.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

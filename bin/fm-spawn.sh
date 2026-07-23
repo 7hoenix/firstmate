@@ -61,6 +61,10 @@
 #   signing disabled scoped to that worktree only, so an autonomous crewmate never
 #   blocks on an interactive commit signer; the primary and siblings keep their
 #   normal signing (fm-sign-lib.sh).
+#   For ship/scout tasks, per-project workspace setup (toolchain/deps/secrets) runs
+#   synchronously after the worktree is final via fm-workspace-setup.sh, from
+#   config/workspace-setup.json; a project with no entry is a no-op, and a setup
+#   failure is surfaced loudly but never bricks the spawn (docs/workspace-setup.md).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -889,6 +893,22 @@ fi
 # this right before validation; both applications are idempotent.
 if ! "$SCRIPT_DIR/fm-nm-clone-config.sh" "$WT"; then
   echo "warning: could not fully harden the no-mistakes internal clone for $WT; the validation pipeline may block on an interactive signer or credential prompt" >&2
+fi
+
+# Per-project workspace setup: bring the leased worktree up with its toolchain,
+# deps, and secrets per config/workspace-setup.json, idempotently, on both fresh
+# creation and re-lease (fm-workspace-setup.sh). Runs for ship and scout tasks; a
+# secondmate home is a firstmate repo worktree, not a project, so it is skipped.
+# A project with no config entry is a silent instant no-op (zero behavior change).
+# Synchronous by design: the worktree must be ready before the agent launches. A
+# setup failure never bricks the spawn - it leaves the worktree usable and is
+# surfaced loudly here so firstmate can relay it; full output is in the log.
+if [ "$KIND" != secondmate ]; then
+  SETUP_PROJ=$(basename "$PROJ_ABS")
+  SETUP_LOG="$STATE/$ID.setup.log"
+  if ! "$SCRIPT_DIR/fm-workspace-setup.sh" run --worktree "$WT" --project "$SETUP_PROJ" --log "$SETUP_LOG"; then
+    echo "warning: workspace setup for $SETUP_PROJ reported errors; the worktree is usable but its toolchain, deps, or secrets may be incomplete - see $SETUP_LOG" >&2
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

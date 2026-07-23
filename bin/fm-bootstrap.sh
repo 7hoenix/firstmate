@@ -9,6 +9,8 @@
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
+#                 "WORKSPACE_SETUP: invalid config/workspace-setup.json - <reason>",
+#                 "WORKSPACE_SETUP: active config/workspace-setup.json" plus indented per-project steps,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -626,6 +628,9 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 crew_dispatch_validate
+# Workspace-setup config validation is owned by fm-workspace-setup.sh (which also
+# consumes the schema at spawn time); bootstrap only relays its WORKSPACE_SETUP lines.
+"$SCRIPT_DIR/fm-workspace-setup.sh" validate --config-dir "$CONFIG" || true
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
