@@ -266,4 +266,31 @@ assert_contains "$out" "WORKSPACE_SETUP: active config/workspace-setup.json" "sh
 assert_not_contains "$out" "invalid" "shipped example has no validation errors"
 pass "docs/examples/workspace-setup.json validates cleanly"
 
+# ---------------------------------------------------------------------------
+# 12. Linked worktree (the real production shape): the marker and its temp glob
+#     must land in the exclude file git actually honors - the shared common
+#     .git/info/exclude, not the per-worktree admin dir git ignores - so the
+#     marker never shows as dirty. Plain-init repos masked this because their
+#     admin dir and common dir are the same file.
+# ---------------------------------------------------------------------------
+main_repo="$TMP_ROOT/linked-main"
+git -C "$TMP_ROOT" init -q linked-main
+git -C "$main_repo" commit -q --allow-empty -m init
+linked_wt="$TMP_ROOT/linked-wt"
+git -C "$main_repo" worktree add -q --detach "$linked_wt" >/dev/null 2>&1
+cfg="$TMP_ROOT/linked.json"
+write_config "$cfg" '{
+  "app": { "steps": [ { "name": "deps", "run": "echo deps >> .witness", "phase": "both" } ] }
+}'
+run_setup "$cfg" "$linked_wt" app
+expect_code 0 "$REPLY_RC" "linked-worktree setup exits 0"
+assert_present "$linked_wt/.fm-workspace-setup.json" "marker written in linked worktree"
+common_excl=$(git -C "$linked_wt" rev-parse --git-path info/exclude)
+case "$common_excl" in /*) : ;; *) common_excl="$linked_wt/$common_excl" ;; esac
+assert_grep ".fm-workspace-setup.json" "$common_excl" "marker added to the exclude file git honors"
+assert_grep "fm-wss-marker" "$common_excl" "temp glob added to the exclude file git honors"
+[ -z "$(git -C "$linked_wt" status --porcelain -- .fm-workspace-setup.json)" ] \
+  || fail "linked-worktree marker must not show as dirty: $(git -C "$linked_wt" status --porcelain -- .fm-workspace-setup.json)"
+pass "linked worktree -> marker excluded via common .git/info/exclude; worktree stays clean"
+
 pass "ALL fm-workspace-setup tests passed"

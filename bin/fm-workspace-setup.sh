@@ -199,14 +199,19 @@ cmd_validate() {
 
 # git_exclude_marker <worktree>: add the state marker to the worktree's
 # info/exclude so it never shows as dirty (mirrors fm-spawn's exclude_path). Uses
-# the absolute git dir so the path is correct regardless of this script's cwd, and
-# resolves to the per-worktree git dir for a linked worktree.
+# `rev-parse --git-path info/exclude`, the exclude file git actually honors: for a
+# linked worktree that resolves to the shared common .git/info/exclude (git ignores
+# the per-worktree admin dir's info/exclude), and for a plain-init repo it returns a
+# relative path we resolve against the worktree.
 git_exclude_marker() {
-  local wt=$1 gitdir excl pat
-  gitdir=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null || true)
-  [ -n "$gitdir" ] || return 0
-  excl="$gitdir/info/exclude"
-  mkdir -p "$gitdir/info" 2>/dev/null || return 0
+  local wt=$1 excl pat
+  excl=$(git -C "$wt" rev-parse --git-path info/exclude 2>/dev/null || true)
+  [ -n "$excl" ] || return 0
+  case "$excl" in
+    /*) : ;;
+    *) excl="$wt/$excl" ;;
+  esac
+  mkdir -p "$(dirname "$excl")" 2>/dev/null || return 0
   for pat in "$MARKER_NAME" ".fm-wss-marker.*"; do
     grep -qxF "$pat" "$excl" 2>/dev/null || printf '%s\n' "$pat" >> "$excl"
   done
