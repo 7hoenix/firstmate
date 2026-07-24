@@ -366,7 +366,10 @@ FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # status regex that makes watcher and daemon signal/stale/scan output captain-relevant
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
-FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
+FM_PAUSE_RESURFACE_SECS=3600       # default seconds before an idle declared external wait re-surfaces for a recheck; a lane can widen its own window inline with a `paused [recheck=<dur>]: <why>` token (s/m/h/d suffix or bare seconds), and bin/fm-pause-ack.sh defers the next recheck a full window without a crew turn
+FM_PAUSE_RECHECK_MIN_SECS=300      # floor a per-pause [recheck=<dur>] token is clamped up to, so no token can recheck faster than the floor
+FM_PAUSE_RECHECK_MAX_SECS=86400    # ceiling a per-pause [recheck=<dur>] token is clamped down to, so a forgotten pause still re-surfaces within a day
+FM_PAUSE_RESURFACE_MAX_SECS=43200  # exponential-backoff ceiling: an unchanged pause's recheck interval widens base*2^streak up to this cap (12h), shared by watcher and daemon
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)

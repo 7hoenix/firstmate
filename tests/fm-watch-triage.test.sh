@@ -1207,6 +1207,239 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- per-pause recheck cadence + supervisor ack (parked-lane recheck-burn fixes) ---
+
+# pause_recheck_secs / _fm_parse_duration (pure): a declared pause may carry an inline
+# [recheck=<dur>] token between the verb and the colon to widen its recheck window past
+# the fleet default; the value is clamped so no token can nag faster than the floor or
+# push a recheck past the day ceiling. The generalized status_line_verb still recovers
+# the bare verb, and the token is not captain-relevant.
+test_pause_recheck_secs_classifier() {
+  [ "$(_fm_parse_duration 8h)" = 28800 ] || fail "8h did not parse to 28800s"
+  [ "$(_fm_parse_duration 30m)" = 1800 ] || fail "30m did not parse to 1800s"
+  [ "$(_fm_parse_duration 45s)" = 45 ] || fail "45s did not parse to 45s"
+  [ "$(_fm_parse_duration 2d)" = 172800 ] || fail "2d did not parse to 172800s"
+  [ "$(_fm_parse_duration 3600)" = 3600 ] || fail "a bare integer did not parse as seconds"
+  _fm_parse_duration 8x >/dev/null 2>&1 && fail "an unparseable duration token was accepted"
+  _fm_parse_duration m >/dev/null 2>&1 && fail "a unit with no number was accepted"
+  [ "$(status_line_verb 'paused [recheck=8h]: awaiting the release cut')" = paused ] \
+    || fail "status_line_verb did not strip a [recheck=...] token to recover the bare verb"
+  status_is_paused 'paused [recheck=8h]: awaiting the release cut' \
+    || fail "a paused line with a recheck token was not recognized as paused"
+  status_is_captain_relevant 'paused [recheck=8h]: awaiting the release cut' \
+    && fail "a paused recheck line was wrongly captain-relevant"
+  [ "$(pause_recheck_secs 'paused: holding')" = 3600 ] || fail "no-token pause did not use the default cadence"
+  [ "$(pause_recheck_secs 'paused [recheck=8h]: awaiting merge')" = 28800 ] || fail "recheck token cadence not honored"
+  [ "$(pause_recheck_secs 'paused [recheck=10s]: x')" = 300 ] || fail "a too-short recheck token was not clamped up to the floor"
+  [ "$(pause_recheck_secs 'paused [recheck=3d]: x')" = 86400 ] || fail "a too-long recheck token was not clamped to the day ceiling"
+  [ "$(pause_recheck_secs 'paused [recheck=lol]: x')" = 3600 ] || fail "an unparseable token did not fall back to the default"
+  [ "$(FM_PAUSE_RESURFACE_SECS=1200 pause_recheck_secs 'paused: holding')" = 1200 ] || fail "the fleet-default env override was not honored"
+  pass "pause_recheck_secs: default, inline [recheck=] widening, clamping, and fallback all correct"
+}
+
+# A captain-gated lane's inline [recheck=<dur>] token WIDENS its recheck window past the
+# fleet default: a pane the default cadence would already re-surface stays absorbed under
+# the longer token window, then still re-surfaces (never as a wedge) past that window.
+test_paused_recheck_token_widens_window() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf back
+  dir=$(make_case paused-recheck-token); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-merge-gate"
+  printf 'idle, awaiting the release cut' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/merge-gate.meta"
+  statusf="$state/merge-gate.status"
+  # A captain-gated pause declaring an 8h recheck window, aged 500s - well past the
+  # (test) default resurface window but far short of the declared token window.
+  printf 'paused [recheck=8h]: awaiting the release cut\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-merge-gate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, awaiting the release cut")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the release cut'
+
+  # Phase A: the default window (240s) is exceeded, but the token widens it to 8h, so
+  # the pane is absorbed, not re-surfaced.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a captain-gated pause re-surfaced under its widened token window (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "widened-window pause printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "widened-window pause enqueued a wake during absorb"
+  [ -e "$state/.paused-$key" ] || fail "widened-window pause did not record the paused flag"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "widened-window pause wrongly recorded a re-surface"
+  reap "$pid"
+
+  # Phase B: shorten the token to a window the age now exceeds (floor lowered so 100s is
+  # not clamped); the pause re-surfaces as a recheck, never a wedge.
+  printf 'paused [recheck=100s]: awaiting the release cut\n' > "$statusf"
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-merge-gate_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_RECHECK_MIN_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a pause past its (shortened) token window did not re-surface"
+  grep -F "awaiting external" "$out" >/dev/null || fail "token-window re-surface was not a paused recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a token-window pause was mislabeled a wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "an inline [recheck=] token widens the pause window, then still re-surfaces past its own window (never a wedge)"
+}
+
+# A supervisor-side ack (fm-pause-ack.sh's marker) defers the next recheck a full window
+# WITHOUT a crew turn: a pane the cadence would otherwise re-surface stays absorbed while
+# the ack is fresh, and re-surfaces again once the ack itself ages out.
+test_paused_ack_defers_recheck() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf ackf back
+  dir=$(make_case paused-ack-defer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-acked"
+  printf 'idle, holding for upstream' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/acked.meta"
+  statusf="$state/acked.status"
+  printf 'paused: holding for the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-acked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  ackf="$state/.paused-ack-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream release'
+
+  # Phase A: the status is 500s old (past the 240s window), but a FRESH ack anchors the
+  # recheck age at "now", so the pane is absorbed - no crew turn was needed to defer it.
+  : > "$ackf"   # fresh mtime = now
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a fresh ack did not defer the recheck (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an acked pause printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "an acked pause enqueued a wake during absorb"
+  reap "$pid"
+
+  # Phase B: age the ack marker past the window too; with neither anchor fresh the pause
+  # re-surfaces again (the ack defers, it does not permanently suppress).
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$ackf"
+  else touch -m -d "@$back" "$ackf"; fi
+  : > "$out"
+  printf 'idle, holding for upstream (t2)' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an aged-out ack did not let the pause re-surface"
+  grep -F "awaiting external" "$out" >/dev/null || fail "post-ack re-surface was not a paused recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "post-ack re-surface was mislabeled a wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a supervisor ack defers the next recheck a full window without a crew turn, then the pause re-surfaces once the ack ages out"
+}
+
+# fm-pause-ack.sh: touches the window-keyed ack marker (matching the watcher's key) for a
+# task in a declared pause, resets the re-surface throttle, and refuses a non-paused task,
+# a missing task, and a missing argument.
+test_pause_ack_script() {
+  local dir state window key
+  dir=$(make_case pause-ack-script); state="$dir/state"; window="sess:fm-merge-x"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/merge-x.meta"
+  printf 'paused [recheck=8h]: awaiting the release cut\n' > "$state/merge-x.status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  : > "$state/.paused-resurfaced-$key"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pause-ack.sh" merge-x >/dev/null 2>&1 || fail "fm-pause-ack refused a genuinely paused task"
+  [ -e "$state/.paused-ack-$key" ] || fail "fm-pause-ack did not create the window-keyed ack marker"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "fm-pause-ack did not clear the re-surface throttle"
+  printf 'working: building\n' > "$state/merge-x.status"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pause-ack.sh" merge-x >/dev/null 2>&1 && fail "fm-pause-ack acked a task that is not paused"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pause-ack.sh" nope >/dev/null 2>&1 && fail "fm-pause-ack acked a task with no metadata"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pause-ack.sh" >/dev/null 2>&1 && fail "fm-pause-ack accepted a missing task-id argument"
+  pass "fm-pause-ack.sh: acks a paused task with the watcher-matching key, clears the throttle, and refuses non-paused/missing/no-arg"
+}
+
+# pause_backoff_secs (pure): the effective recheck interval after exponential backoff -
+# base doubled per streak, capped at FM_PAUSE_RESURFACE_MAX_SECS, with a declared base
+# above the cap kept (never shortened by backoff) and bad inputs falling back safely.
+test_pause_backoff_secs_classifier() {
+  [ "$(pause_backoff_secs 3600 0)" = 3600 ] || fail "streak 0 did not return the base interval"
+  [ "$(pause_backoff_secs 3600 1)" = 7200 ] || fail "streak 1 did not double the base"
+  [ "$(pause_backoff_secs 3600 3)" = 28800 ] || fail "streak 3 did not widen to 8x base"
+  [ "$(pause_backoff_secs 3600 4)" = 43200 ] || fail "streak 4 was not capped at the 12h ceiling"
+  [ "$(pause_backoff_secs 3600 9)" = 43200 ] || fail "a large streak was not held at the ceiling"
+  [ "$(pause_backoff_secs 86400 2)" = 86400 ] || fail "a declared base above the ceiling was shortened by backoff"
+  [ "$(FM_PAUSE_RESURFACE_MAX_SECS=21600 pause_backoff_secs 3600 5)" = 21600 ] || fail "a custom ceiling override was not honored"
+  [ "$(pause_backoff_secs 3600 x)" = 3600 ] || fail "a non-numeric streak was not treated as 0"
+  [ "$(pause_backoff_secs '' 2)" = 14400 ] || fail "a bad base did not fall back to the default and widen"
+  pass "pause_backoff_secs: base*2^streak, capped, declared-base-above-cap preserved, bad inputs safe"
+}
+
+# The watcher's pause recheck interval WIDENS as an unchanged pause keeps re-surfacing
+# (the streak grows) and RESETS when the crew writes a fresh status line (the stored
+# status mtime no longer matches). Driven deterministically with seeded streak markers
+# and a backdated status file - no long waits.
+test_paused_backoff_widens_and_resets() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf back smtime
+  dir=$(make_case paused-backoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-backoff"
+  printf 'idle, holding for upstream' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/backoff.meta"
+  statusf="$state/backoff.status"
+  printf 'paused: holding for the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-backoff_status"
+  smtime=$(file_mtime "$statusf")
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream release'
+  # Base 100s (default with no token); floor lowered so 100 is not clamped up.
+  run_watch() {  # runs one cycle; sets global RC (124 = absorbed/alive, else surfaced)
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=100 FM_PAUSE_RECHECK_MIN_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    local p=$!; wait_for_exit "$p" 40; RC=$?
+  }
+
+  # Phase A: fresh pause, no streak marker (streak 0, effective 100s), aged 500s -> surfaces
+  # and records streak 1.
+  run_watch
+  [ "$RC" != 124 ] || fail "a fresh pause past its base window did not surface"
+  grep -F "awaiting external" "$out" >/dev/null || fail "phase A surface was not a paused recheck"
+  [ "$(cut -f1 < "$state/.paused-streak-$key")" = 1 ] || fail "phase A did not record streak 1 after surfacing"
+
+  # Phase B: seed a high streak matching the current status mtime -> effective 100*2^6=6400s,
+  # so the 500s age is well short of the widened window and the pane is absorbed, streak intact.
+  printf '6\t%s' "$smtime" > "$state/.paused-streak-$key"
+  rm -f "$state/.paused-resurfaced-$key"
+  run_watch
+  [ "$RC" = 124 ] || fail "a high-streak pause surfaced inside its widened backoff window: $(cat "$out")"
+  [ "$(cut -f1 < "$state/.paused-streak-$key")" = 6 ] || fail "an absorbed high-streak pause changed its streak"
+
+  # Phase C: seed a high streak with a STALE mtime (a fresh crew status line since) -> the
+  # backoff resets to base, so the 500s age surfaces again and the streak restarts at 1.
+  printf '6\t%s' "$(( smtime - 9999 ))" > "$state/.paused-streak-$key"
+  rm -f "$state/.paused-resurfaced-$key"
+  run_watch
+  [ "$RC" != 124 ] || fail "a pause with a stale streak mtime did not reset backoff and re-surface"
+  [ "$(cut -f1 < "$state/.paused-streak-$key")" = 1 ] || fail "a fresh status line did not reset the streak to base then re-count"
+  unset FM_FAKE_CREW_STATE
+  pass "the pause recheck interval widens with an unchanged pause and resets on a fresh status line"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1227,6 +1460,12 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_pause_recheck_secs_classifier
+test_pause_backoff_secs_classifier
+test_paused_recheck_token_widens_window
+test_paused_backoff_widens_and_resets
+test_paused_ack_defers_recheck
+test_pause_ack_script
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
