@@ -3,7 +3,7 @@ name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
   Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
+  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, short commit messages, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -72,6 +72,7 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - Never wrap multiple sentences onto one physical line.
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
+- Keep commit messages short here too: a concise imperative subject plus at most a few body lines of what and why, with the long story going in the PR description; `bin/fm-brief.sh`'s ship scaffold owns the full commit-style contract that crewmates receive, and firstmate-repo commits follow it.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
