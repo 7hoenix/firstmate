@@ -140,7 +140,8 @@ Classify each wake this way:
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
   -> self-handle. Captain-relevant verb -> escalate.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
-  If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
+  If it remains declared and idle past its recheck window, housekeeping sends one awaiting-external recheck and resets the pause window.
+  The window is per-pause: the fleet default `FM_PAUSE_RESURFACE_SECS` (default 3600s), or a longer cadence a captain-gated lane declared inline with a `paused [recheck=<dur>]:` token, then widened by the same asymmetric exponential backoff the watcher uses (`bin/fm-classify-lib.sh`'s `pause_recheck_secs` and `pause_backoff_secs` own the shared grammar and math), capped at `FM_PAUSE_RESURFACE_MAX_SECS` (default 12h). A supervisor-side `bin/fm-pause-ack.sh` marker defers the next recheck a full window at the current backoff level without a crew turn.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past
