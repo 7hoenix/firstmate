@@ -148,7 +148,7 @@ That yields labels like `firstmate-<8hex>` or `2ndmate-<id>-<8hex>`, making the 
 This was hardened in two captain-directed no-mistakes review gate follow-ups: first by adding the home tag for primary-vs-secondmate collisions, then by adding the `FM_ROOT` hash so two distinct primary installations cannot collide either.
 Physically moving or relocating a firstmate installation changes its tag, so workspaces titled under the old tag stop matching after a move.
 That is acceptable because a task's own recorded worktree path in `state/<id>.meta` does not survive a repo relocation either, so this is consistent with an existing, already accepted limitation, not a new one.
-There is still no per-home cmux container split (unlike herdr's later refinement); the home tag is a title discriminator only.
+There is no per-home or per-task cmux container split beyond the one-workspace-per-task shape; the home tag is a title discriminator only.
 
 ## Target string and meta fields
 
@@ -368,7 +368,7 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
 - **GUI-first, macOS-only, requires the app running** - identical posture to Orca.
   Never a candidate for a headless/CI firstmate instance, because runtime auto-detection (cmux runtime signals; see "Runtime auto-detection" above) can only fire from inside a live cmux terminal in the first place.
   The one-time socket-access setup remains an unavoidable manual step regardless of how the backend was selected.
-- **`--secondmate` spawns are refused** (mirrors Orca's refusal) - no per-home container design (a herdr-style workspace-per-home split, or similar) has been designed or verified for cmux yet.
+- **`--secondmate` spawns are refused** (mirrors Orca's refusal) - no home-scoped container design (a herdr-style per-task-workspace-with-home-prefixed-labels split, or similar) has been designed or verified for cmux yet.
 - **The one-time socket-access setup is a real, undocumented-by-upstream onboarding step.** A captain who selects `backend=cmux` without first switching `automation.socketControlMode` away from its `cmuxOnly` default to a viable mode (Automation mode recommended; see "Setup") will see every spawn fail with an actionable error naming the viable modes and pointing back to this document, but there is no way for firstmate to complete that GUI-only setup step on the captain's behalf.
 - **A surface can still die in the brief window between `target_ready` succeeding and the operation's own call running.** That remaining race degrades to "the operation quietly did nothing" - the same class of gap firstmate already tolerates for an unverified send on any backend, caught downstream by `fm-spawn.sh`'s worktree-discovery poll timing out, `fm_backend_cmux_send_text_submit`'s retry loop (which reports `send-failed`/`pending`/`unknown` rather than a false "sent"), or the watcher's stale-pane detection.
 - **Windows cannot be closed over the control socket, and label lookup is current-window scoped** - both owned by "Closing the last workspace in a window" above. Teardown of a last-in-window task workspace therefore leaves that window a fresh default workspace rather than closing it, and `fm_backend_cmux_workspace_id_for_label`/`fm_backend_cmux_list_live` only see the current window, so a task workspace parked in a non-current window is a known blind spot for label-based recovery.

@@ -581,6 +581,22 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# fm_backend_reap_workspace: after a task's endpoint is killed, close its own
+# now-empty per-task container if the backend has one and it is safe to do so
+# (best-effort, never fails teardown). Only herdr implements meaningful
+# behavior today (P4, workspace-per-task; see
+# fm_backend_herdr_reap_owned_workspace); every other backend is a no-op, so
+# teardown can call this unconditionally.
+fm_backend_reap_workspace() {  # <backend> <target> <workspace-id> <task-label>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    herdr) fm_backend_herdr_reap_owned_workspace "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

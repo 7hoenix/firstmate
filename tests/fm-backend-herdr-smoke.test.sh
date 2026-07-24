@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-smoke.test.sh - real herdr smoke test for the herdr
 # session-provider adapter (bin/backends/herdr.sh), P2 of
-# data/fm-backend-design-d7 (herdr-addendum.md), extended for the P3
-# workspace-per-home pass (AGENTS.md task herdr-sm-spaces-k4). Mirrors
+# data/fm-backend-design-d7 (herdr-addendum.md), extended for the P4
+# workspace-per-task pass (AGENTS.md task herdr-workspace-per-task-6w, which
+# supersedes the P3 workspace-per-home shape). Mirrors
 # tests/fm-backend-tmux-smoke.test.sh's structure: every other suite fakes the
 # CLI, this one talks to a REAL herdr server - but ALWAYS on a private, named,
 # throwaway HERDR_SESSION (never the default session), so it never touches a
@@ -46,33 +47,34 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
 pass "real herdr: version_check accepts the installed binary's protocol"
 
-# fm_backend_herdr_container_ensure now echoes
-# "<session>:<workspace_id>\t<seeded_default_tab_id>" (the second field empty
-# when the call ADOPTED a pre-existing workspace rather than creating a fresh
-# one - docs/herdr-backend.md "Default-tab prune"). Split on the guaranteed
-# single tab character; only fm_backend_herdr_create_task is ever allowed to
-# act on the seeded tab id, and only for the container that just created it.
-CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensure failed"
+# fm_backend_herdr_container_ensure takes a task label (P4, workspace-per-task)
+# and echoes "<session>:<workspace_id>\t<seeded_default_tab_id>" (the second
+# field empty when the call ADOPTED an existing same-task workspace rather than
+# creating a fresh one - docs/herdr-backend.md "Default-tab prune"). Split on
+# the guaranteed single tab character; only fm_backend_herdr_create_task is
+# ever allowed to act on the seeded tab id, and only for the container that
+# just created it.
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp fm-smoke1) || fail "container_ensure failed"
 CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
 case "$CONTAINER" in
   "$SESSION":w*) : ;;
   *) fail "container_ensure returned an unexpected shape: $CONTAINER" ;;
 esac
-[ -n "$SEEDED_TAB_ID" ] || fail "the first container_ensure in a brand-new isolated session must CREATE the workspace and report its seeded default tab id"
-pass "real herdr: container_ensure starts the isolated session's server, creates the firstmate workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
+[ -n "$SEEDED_TAB_ID" ] || fail "the first container_ensure for this task in a brand-new isolated session must CREATE its per-task workspace and report its seeded default tab id"
+pass "real herdr: container_ensure starts the isolated session's server, creates the per-task workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
 
-# A second container_ensure must reuse (ADOPT) the same workspace (idempotent)
-# and report an EMPTY seeded tab id - the created-vs-adopted gate that fixes
-# the 2026-07-02 self-kill incident (docs/herdr-backend.md "Default-tab
-# prune"): only the call that actually just created a workspace may identify
-# a tab as prunable.
-CONTAINER2_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "second container_ensure failed"
+# A second container_ensure for the SAME task label (e.g. a respawn) must reuse
+# (ADOPT) that task's workspace (idempotent) and report an EMPTY seeded tab id -
+# the created-vs-adopted gate that fixes the 2026-07-02 self-kill incident
+# (docs/herdr-backend.md "Default-tab prune"): only the call that actually just
+# created a workspace may identify a tab as prunable.
+CONTAINER2_RAW=$(fm_backend_herdr_container_ensure /tmp fm-smoke1) || fail "second container_ensure failed"
 CONTAINER2=${CONTAINER2_RAW%%$'\t'*}
 SEEDED_TAB_ID2=${CONTAINER2_RAW#*$'\t'}
-[ "$CONTAINER2" = "$CONTAINER" ] || fail "container_ensure is not idempotent: '$CONTAINER' vs '$CONTAINER2'"
-[ -z "$SEEDED_TAB_ID2" ] || fail "an ADOPTED (reused) workspace must report an EMPTY seeded default tab id, got '$SEEDED_TAB_ID2'"
-pass "real herdr: container_ensure is idempotent (reuses/adopts the existing firstmate workspace, reports no seeded default tab on adoption)"
+[ "$CONTAINER2" = "$CONTAINER" ] || fail "container_ensure is not idempotent for the same task label: '$CONTAINER' vs '$CONTAINER2'"
+[ -z "$SEEDED_TAB_ID2" ] || fail "an ADOPTED (reused) same-task workspace must report an EMPTY seeded default tab id, got '$SEEDED_TAB_ID2'"
+pass "real herdr: container_ensure is idempotent for a task (a respawn reuses/adopts the same task's workspace, reports no seeded default tab on adoption)"
 
 # --- create_task + duplicate refusal + default-tab prune ---------------------
 
@@ -164,12 +166,13 @@ printf '%s' "$HUSK_WS_TABS" | jq -e --arg t "$NEW_HUSK_TAB_ID" '.result.tabs[] |
 pass "real herdr: create_task closes and replaces a same-labeled tab whose pane hosts no registered agent (the restored-husk shape), leaving the workspace intact"
 fm_backend_herdr_kill "$SESSION:$NEW_HUSK_PANE_ID"
 
-# --- workspace-per-home: a secondmate-shaped home gets its OWN space --------
+# --- per-task label: a secondmate-shaped home's task gets a home-prefixed
+# workspace ------------------------------------------------------------------
 # (docs/herdr-backend.md "Task container shape", AGENTS.md task
-# herdr-sm-spaces-k4). Reuses this suite's own isolated $SESSION - a SECOND,
-# distinct workspace inside the SAME session, never a second session. Placed
-# here (both workspaces' tabs still alive) so the restart-stability check
-# right after it exercises the true multi-workspace shape, not a
+# herdr-workspace-per-task-6w). Reuses this suite's own isolated $SESSION - a
+# SECOND, distinct workspace inside the SAME session, never a second session.
+# Placed here (both workspaces' tabs still alive) so the restart-stability
+# check right after it exercises the true multi-workspace shape, not a
 # possibly-emptied-and-auto-closed primary workspace.
 
 SM_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-smoke-sm.XXXXXX")
@@ -177,7 +180,7 @@ SM_HOME="$SM_SCRATCH/secondmate-home"
 mkdir -p "$SM_HOME"
 printf 'smoketest-sm1\n' > "$SM_HOME/.fm-secondmate-home"
 
-SM_CONTAINER_RAW=$(FM_HOME="$SM_HOME" fm_backend_herdr_container_ensure /tmp) || fail "secondmate-shaped container_ensure failed"
+SM_CONTAINER_RAW=$(FM_HOME="$SM_HOME" fm_backend_herdr_container_ensure /tmp fm-smtask1) || fail "secondmate-shaped container_ensure failed"
 SM_CONTAINER=${SM_CONTAINER_RAW%%$'\t'*}
 SM_SEEDED_TAB_ID=${SM_CONTAINER_RAW#*$'\t'}
 case "$SM_CONTAINER" in
@@ -190,8 +193,8 @@ pass "real herdr: a secondmate-shaped home (.fm-secondmate-home) gets its OWN he
 
 SM_WSID=${SM_CONTAINER#*:}
 SM_LABEL_REAL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$SM_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$SM_LABEL_REAL" = "2ndmate-smoketest-sm1" ] || fail "the secondmate workspace's real herdr label should be 2ndmate-smoketest-sm1, got '$SM_LABEL_REAL'"
-pass "real herdr: the secondmate-shaped home's workspace is labeled 2ndmate-<secondmate-id> in herdr itself"
+[ "$SM_LABEL_REAL" = "2ndmate-smoketest-sm1-fm-smtask1" ] || fail "the secondmate workspace's real herdr label should be the home-prefixed per-task 2ndmate-smoketest-sm1-fm-smtask1, got '$SM_LABEL_REAL'"
+pass "real herdr: the secondmate-shaped home's per-task workspace is labeled 2ndmate-<secondmate-id>-fm-<id> in herdr itself"
 
 SM_TASK_LABEL="fm-smtask1"
 SM_TASK_IDS=$(FM_HOME="$SM_HOME" fm_backend_herdr_create_task "$SM_CONTAINER" "$SM_TASK_LABEL" /tmp "$SM_SEEDED_TAB_ID") || fail "secondmate create_task failed"
@@ -230,8 +233,8 @@ sleep 0.5
 fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"
 
 POST_LIST=$(herdr workspace list --session "$SESSION" 2>&1)
-POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate") | .workspace_id')
-POST_SM_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "2ndmate-smoketest-sm1" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
+POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "fm-smoke1") | .workspace_id')
+POST_SM_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "2ndmate-smoketest-sm1-fm-smtask1" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
 [ "$POST_PRIMARY_ID" = "${CONTAINER#*:}" ] || fail "the primary workspace id did not survive the restart: before=${CONTAINER#*:} after=$POST_PRIMARY_ID"
 [ "$POST_SM_ID" = "$SM_WSID" ] || fail "the secondmate workspace id did not survive the restart: before=$SM_WSID after=$POST_SM_ID"
 
@@ -324,17 +327,15 @@ pass "real herdr: kill removes the pane and is idempotent/best-effort"
 # --- list_live (label-based recovery discovery) ------------------------------
 
 # Real firstmate spawns always re-run container_ensure immediately before
-# create_task (bin/fm-spawn.sh), never reusing a container reference from an
-# earlier spawn. This test must do the same: the kill above closed the only
-# remaining tab in $CONTAINER's workspace, and closing a workspace's last tab
-# deletes the workspace itself (verified real-herdr behavior), so the stale
-# $CONTAINER from container_ensure at test start no longer names a live
+# create_task (bin/fm-spawn.sh), once per task. Under P4 a DIFFERENT task
+# (fm-smoke2) gets its OWN fresh per-task workspace, so container_ensure here
+# CREATES (non-empty seeded default tab id), never adopts the earlier task's
 # workspace.
-CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensure for the second task failed"
+LABEL2="fm-smoke2"
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp "$LABEL2") || fail "container_ensure for the second task failed"
 CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
-[ -n "$SEEDED_TAB_ID" ] || fail "the workspace was deleted when its last tab was killed, so this container_ensure must CREATE a fresh one and report its seeded default tab id"
-LABEL2="fm-smoke2"
+[ -n "$SEEDED_TAB_ID" ] || fail "a distinct task must CREATE its own fresh per-task workspace and report its seeded default tab id"
 TASK_IDS2=$(fm_backend_herdr_create_task "$CONTAINER" "$LABEL2" /tmp "$SEEDED_TAB_ID") || fail "second create_task failed"
 read -r _TAB_ID2 PANE_ID2 <<EOF
 $TASK_IDS2
