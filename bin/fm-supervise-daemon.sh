@@ -432,7 +432,7 @@ pause_marker_record() {  # <window> <state> - create if absent
 pause_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
-  rm -f "$state/.subsuper-paused-$key"
+  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-paused-streak-$key"
 }
 
 clear_pause_tracking() {  # <window> <state>
@@ -440,9 +440,9 @@ clear_pause_tracking() {  # <window> <state>
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
-  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
+  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-paused-streak-$key" "$state/.subsuper-stale-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
-    "$state/.paused-ack-$watcher_key" \
+    "$state/.paused-ack-$watcher_key" "$state/.paused-streak-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
 }
 
@@ -917,7 +917,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs watcher_key anchor ack_mtime
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs watcher_key anchor ack_mtime base streak streak_file
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -998,11 +998,19 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
-    # Per-pause recheck cadence: the fleet default, or a longer inline [recheck=<dur>]
-    # a captain-gated lane declared (fm-classify-lib.sh:pause_recheck_secs, one owner).
-    # An active-session ack (bin/fm-pause-ack.sh) defers the window: anchor the age on
-    # the NEWER of this marker's epoch and the ack marker's mtime.
-    pause_secs=$(pause_recheck_secs "$last")
+    # Per-pause recheck cadence, with the same asymmetric backoff the watcher uses so the
+    # two supervisors widen identically (fm-classify-lib.sh:pause_backoff_secs is the one
+    # owner of both the token base and the backoff math). Base is the fleet default or a
+    # longer inline [recheck=<dur>] the lane declared; the streak (kept per pause in
+    # .subsuper-paused-streak-<key>, its lifetime tied to this marker) doubles the interval
+    # each surfaced-and-unchanged recheck. An active-session ack (bin/fm-pause-ack.sh)
+    # defers the window at the current level: anchor the age on the NEWER of this marker's
+    # epoch and the ack marker's mtime.
+    base=$(pause_recheck_secs "$last")
+    streak_file="$state/.subsuper-paused-streak-$key"
+    streak=$(cat "$streak_file" 2>/dev/null || echo 0)
+    case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+    pause_secs=$(pause_backoff_secs "$base" "$streak")
     watcher_key=$(_stale_key "$win")
     anchor=$(cat "$marker" 2>/dev/null || echo "$now")
     ack_mtime=$(_stat_file_mtime "$state/.paused-ack-$watcher_key")
@@ -1012,15 +1020,16 @@ housekeeping() {  # <state>
     [ "$age" -ge "$pause_secs" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+      0) rm -f "$marker" "$streak_file" ;;
+      2) rm -f "$marker" "$streak_file" ;;
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
           escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          echo $(( streak + 1 )) > "$streak_file"
           _now > "$marker"
         else
-          rm -f "$marker"
+          rm -f "$marker" "$streak_file"
         fi
         ;;
     esac

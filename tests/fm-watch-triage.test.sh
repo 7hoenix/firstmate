@@ -1366,6 +1366,80 @@ test_pause_ack_script() {
   pass "fm-pause-ack.sh: acks a paused task with the watcher-matching key, clears the throttle, and refuses non-paused/missing/no-arg"
 }
 
+# pause_backoff_secs (pure): the effective recheck interval after exponential backoff -
+# base doubled per streak, capped at FM_PAUSE_RESURFACE_MAX_SECS, with a declared base
+# above the cap kept (never shortened by backoff) and bad inputs falling back safely.
+test_pause_backoff_secs_classifier() {
+  [ "$(pause_backoff_secs 3600 0)" = 3600 ] || fail "streak 0 did not return the base interval"
+  [ "$(pause_backoff_secs 3600 1)" = 7200 ] || fail "streak 1 did not double the base"
+  [ "$(pause_backoff_secs 3600 3)" = 28800 ] || fail "streak 3 did not widen to 8x base"
+  [ "$(pause_backoff_secs 3600 4)" = 43200 ] || fail "streak 4 was not capped at the 12h ceiling"
+  [ "$(pause_backoff_secs 3600 9)" = 43200 ] || fail "a large streak was not held at the ceiling"
+  [ "$(pause_backoff_secs 86400 2)" = 86400 ] || fail "a declared base above the ceiling was shortened by backoff"
+  [ "$(FM_PAUSE_RESURFACE_MAX_SECS=21600 pause_backoff_secs 3600 5)" = 21600 ] || fail "a custom ceiling override was not honored"
+  [ "$(pause_backoff_secs 3600 x)" = 3600 ] || fail "a non-numeric streak was not treated as 0"
+  [ "$(pause_backoff_secs '' 2)" = 14400 ] || fail "a bad base did not fall back to the default and widen"
+  pass "pause_backoff_secs: base*2^streak, capped, declared-base-above-cap preserved, bad inputs safe"
+}
+
+# The watcher's pause recheck interval WIDENS as an unchanged pause keeps re-surfacing
+# (the streak grows) and RESETS when the crew writes a fresh status line (the stored
+# status mtime no longer matches). Driven deterministically with seeded streak markers
+# and a backdated status file - no long waits.
+test_paused_backoff_widens_and_resets() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf back smtime
+  dir=$(make_case paused-backoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-backoff"
+  printf 'idle, holding for upstream' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/backoff.meta"
+  statusf="$state/backoff.status"
+  printf 'paused: holding for the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-backoff_status"
+  smtime=$(file_mtime "$statusf")
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream release'
+  # Base 100s (default with no token); floor lowered so 100 is not clamped up.
+  run_watch() {  # runs one cycle; sets global RC (124 = absorbed/alive, else surfaced)
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=100 FM_PAUSE_RECHECK_MIN_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    local p=$!; wait_for_exit "$p" 40; RC=$?
+  }
+
+  # Phase A: fresh pause, no streak marker (streak 0, effective 100s), aged 500s -> surfaces
+  # and records streak 1.
+  run_watch
+  [ "$RC" != 124 ] || fail "a fresh pause past its base window did not surface"
+  grep -F "awaiting external" "$out" >/dev/null || fail "phase A surface was not a paused recheck"
+  [ "$(cut -f1 < "$state/.paused-streak-$key")" = 1 ] || fail "phase A did not record streak 1 after surfacing"
+
+  # Phase B: seed a high streak matching the current status mtime -> effective 100*2^6=6400s,
+  # so the 500s age is well short of the widened window and the pane is absorbed, streak intact.
+  printf '6\t%s' "$smtime" > "$state/.paused-streak-$key"
+  rm -f "$state/.paused-resurfaced-$key"
+  run_watch
+  [ "$RC" = 124 ] || fail "a high-streak pause surfaced inside its widened backoff window: $(cat "$out")"
+  [ "$(cut -f1 < "$state/.paused-streak-$key")" = 6 ] || fail "an absorbed high-streak pause changed its streak"
+
+  # Phase C: seed a high streak with a STALE mtime (a fresh crew status line since) -> the
+  # backoff resets to base, so the 500s age surfaces again and the streak restarts at 1.
+  printf '6\t%s' "$(( smtime - 9999 ))" > "$state/.paused-streak-$key"
+  rm -f "$state/.paused-resurfaced-$key"
+  run_watch
+  [ "$RC" != 124 ] || fail "a pause with a stale streak mtime did not reset backoff and re-surface"
+  [ "$(cut -f1 < "$state/.paused-streak-$key")" = 1 ] || fail "a fresh status line did not reset the streak to base then re-count"
+  unset FM_FAKE_CREW_STATE
+  pass "the pause recheck interval widens with an unchanged pause and resets on a fresh status line"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1387,7 +1461,9 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_pause_recheck_secs_classifier
+test_pause_backoff_secs_classifier
 test_paused_recheck_token_widens_window
+test_paused_backoff_widens_and_resets
 test_paused_ack_defers_recheck
 test_pause_ack_script
 test_secondmate_paused_resurfaces_in_normal_mode

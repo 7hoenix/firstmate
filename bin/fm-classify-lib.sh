@@ -69,6 +69,16 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_PAUSE_RECHECK_MIN_SECS_DEFAULT=300
 FM_PAUSE_RECHECK_MAX_SECS_DEFAULT=86400
 
+# Exponential-backoff ceiling for a declared pause's recheck interval (see
+# pause_backoff_secs). A pause that keeps re-surfacing unchanged widens its own recheck
+# window base*2^streak, so a long-idle parked lane is rechecked far less often than
+# hourly while still re-surfacing (the forgotten-pause safety property). This bounds how
+# far backoff may WIDEN a base; it is distinct from the [FM_PAUSE_RECHECK_MIN_SECS,
+# FM_PAUSE_RECHECK_MAX_SECS] clamp above, which bounds what a lane may DECLARE as its base.
+# 12h by default; both supervisors read it so the ceiling has one owner. Overridable.
+# shellcheck disable=SC2034 # Read by the watcher and daemon, not this lib.
+FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT=43200
+
 # The resolution verb that CLOSES a keyed decision opened by needs-decision or
 # blocked. See status_open_decisions below for the full durable-decision contract;
 # this is the one owner of the verb literal, overridable via FM_CLASSIFY_RESOLVE_VERB.
@@ -147,6 +157,29 @@ pause_recheck_secs() {  # <status-line> -> seconds
   esac
   [ "$secs" -lt "$min" ] && secs=$min
   [ "$secs" -gt "$max" ] && secs=$max
+  printf '%s' "$secs"
+}
+
+# The EFFECTIVE recheck interval after exponential backoff: a base interval doubled once
+# per consecutive surfaced-and-unchanged recheck (the streak), capped so a forgotten
+# pause still re-surfaces. This is the asymmetric-backoff math with ONE owner, called by
+# both the watcher and the afk daemon so the two supervisors never drift on next-due
+# timing. It only picks the multiplier; the caller still owns the anchor (the status-file
+# or ack mtime) that decides when the interval has elapsed, and owns resetting the streak
+# to 0 on a positive signal (a fresh crew status line or an authoritative `working`
+# verdict) - never on an ambiguous read. The ceiling is max(base, FM_PAUSE_RESURFACE_MAX_SECS)
+# so a lane that DECLARED a base longer than the ceiling keeps its declared base rather
+# than being shortened by backoff; a huge streak is capped so the shift cannot overflow.
+pause_backoff_secs() {  # <base-secs> <streak> -> effective seconds
+  local base=$1 streak=$2 max ceiling secs
+  case "$base" in ''|*[!0-9]*) base=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT} ;; esac
+  case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  [ "$streak" -gt 30 ] && streak=30
+  max=${FM_PAUSE_RESURFACE_MAX_SECS:-$FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT}
+  ceiling=$max
+  [ "$base" -gt "$ceiling" ] && ceiling=$base
+  secs=$(( base << streak ))
+  { [ "$secs" -gt "$ceiling" ] || [ "$secs" -lt "$base" ]; } && secs=$ceiling
   printf '%s' "$secs"
 }
 

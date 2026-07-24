@@ -342,28 +342,47 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf last resurface_secs mtime ackf ack_mtime anchor age rf rf_age reason
+  local win=$1 task=$2 h=$3 key statusf last base mtime ackf ack_mtime anchor age rf rf_age reason
+  local streakf streak_raw streak stored_mtime effective
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   statusf="$STATE/$task.status"
-  # The per-pause recheck cadence: the fleet default (PAUSE_RESURFACE_SECS), or a longer
+  # The base recheck cadence: the fleet default (FM_PAUSE_RESURFACE_SECS), or a longer
   # window this lane declared inline via a `paused [recheck=<dur>]:` token (a captain-gated
   # merge/release lane that legitimately idles for hours), clamped by the classifier. One
   # owner for the token grammar (fm-classify-lib.sh:pause_recheck_secs).
   last=$(last_status_line "$statusf")
-  resurface_secs=$(pause_recheck_secs "$last")
+  base=$(pause_recheck_secs "$last")
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  # Asymmetric exponential backoff. The recheck interval widens base*2^streak (capped) the
+  # longer an UNCHANGED pause keeps re-surfacing, so ten parked lanes are not each rechecked
+  # hourly for a whole day. The streak marker stores "<streak>\t<status-mtime-it-counted>":
+  # a status-file mtime that no longer matches means the crew wrote a FRESH line, so the
+  # backoff resets to base (a genuinely new pause is rechecked promptly again). Keyed by the
+  # logical window, not the pane hash, so a churny idle pane cannot fabricate new pauses or
+  # reset the streak. Widening owns only the multiplier; the anchor below owns the clock.
+  # fm-classify-lib.sh:pause_backoff_secs is the single owner of the backoff math, shared with
+  # the away-mode daemon so the two supervisors never drift on next-due timing.
+  streakf="$STATE/.paused-streak-$key"
+  streak_raw=$(cat "$streakf" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r streak stored_mtime <<EOF
+$streak_raw
+EOF
+  case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  [ "$stored_mtime" = "$mtime" ] || streak=0   # fresh crew status line resets backoff
+  effective=$(pause_backoff_secs "$base" "$streak")
   # A supervisor-side ack (bin/fm-pause-ack.sh) touches this marker to confirm the wait
   # still holds and defer the next recheck a full window WITHOUT a crew turn: firstmate
   # need not steer a resident high-context crew to re-append `paused:` just to push the
   # cadence out (the parked-lane recheck burn). Anchor the recheck age on the NEWER of the
   # crew's status-file mtime and this ack, so an ack resets the window exactly as a fresh
-  # crew re-append would. The status file itself is never touched by the supervisor - a
-  # size:mtime change would trip scan_signals and fire a spurious signal wake - so the ack
-  # lives in a separate dotfile the signal scan ignores.
+  # crew re-append would; the ack defers at the CURRENT backoff level rather than resetting
+  # the streak. The status file itself is never touched by the supervisor - a size:mtime
+  # change would trip scan_signals and fire a spurious signal wake - so the ack lives in a
+  # separate dotfile the signal scan ignores.
   ackf="$STATE/.paused-ack-$key"
   ack_mtime=$(stat_mtime "$ackf")
   case "$ack_mtime" in ''|*[!0-9]*) ack_mtime=0 ;; esac
@@ -372,13 +391,16 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( $(date +%s) - anchor ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  if [ "$age" -ge "$resurface_secs" ] && [ "$rf_age" -ge "$resurface_secs" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds, or run bin/fm-pause-ack.sh $task to defer the next recheck without waking the crew)"
+  if [ "$age" -ge "$effective" ] && [ "$rf_age" -ge "$effective" ]; then
+    streak=$(( streak + 1 ))   # surfaced unchanged: widen the next window
+    printf '%s\t%s' "$streak" "$mtime" > "$streakf"
+    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a widening cadence not a wedge; confirm the wait still holds, or run bin/fm-pause-ack.sh $task to defer the next recheck without waking the crew)"
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s, recheck ${resurface_secs}s): $win"
+  printf '%s\t%s' "$streak" "$mtime" > "$streakf"   # persist any fresh-status reset
+  triage_log "absorbed stale (paused, awaiting external, age ${age}s, recheck ${effective}s, streak ${streak}): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -386,7 +408,7 @@ clear_pause_state() {  # <window>
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" "$STATE/.paused-ack-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" "$STATE/.paused-ack-$key" "$STATE/.paused-streak-$key"
 }
 
 clear_pause_tracking() {  # <window>
