@@ -129,9 +129,11 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A crew that DECLARED a pause (paused: <reason>, fm-classify-lib.sh) is idling on
 # a known external wait, so its stale pane is absorbed rather than wedge-escalated;
-# it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS - far longer than the
-# wedge threshold, but finite so a forgotten pause cannot rot invisibly.
-PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# it re-surfaces once for a recheck every recheck window - far longer than the wedge
+# threshold, but finite so a forgotten pause cannot rot invisibly. The window is
+# resolved per pause by fm-classify-lib.sh:pause_recheck_secs (the fleet default
+# FM_PAUSE_RESURFACE_SECS, or a longer inline `[recheck=<dur>]` a captain-gated lane
+# declared), so this watcher holds no module-level pause-cadence constant of its own.
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
@@ -340,24 +342,43 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  local win=$1 task=$2 h=$3 key statusf last resurface_secs mtime ackf ack_mtime anchor age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   statusf="$STATE/$task.status"
+  # The per-pause recheck cadence: the fleet default (PAUSE_RESURFACE_SECS), or a longer
+  # window this lane declared inline via a `paused [recheck=<dur>]:` token (a captain-gated
+  # merge/release lane that legitimately idles for hours), clamped by the classifier. One
+  # owner for the token grammar (fm-classify-lib.sh:pause_recheck_secs).
+  last=$(last_status_line "$statusf")
+  resurface_secs=$(pause_recheck_secs "$last")
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
-  age=$(( $(date +%s) - mtime ))
+  # A supervisor-side ack (bin/fm-pause-ack.sh) touches this marker to confirm the wait
+  # still holds and defer the next recheck a full window WITHOUT a crew turn: firstmate
+  # need not steer a resident high-context crew to re-append `paused:` just to push the
+  # cadence out (the parked-lane recheck burn). Anchor the recheck age on the NEWER of the
+  # crew's status-file mtime and this ack, so an ack resets the window exactly as a fresh
+  # crew re-append would. The status file itself is never touched by the supervisor - a
+  # size:mtime change would trip scan_signals and fire a spurious signal wake - so the ack
+  # lives in a separate dotfile the signal scan ignores.
+  ackf="$STATE/.paused-ack-$key"
+  ack_mtime=$(stat_mtime "$ackf")
+  case "$ack_mtime" in ''|*[!0-9]*) ack_mtime=0 ;; esac
+  anchor=$mtime
+  [ "$ack_mtime" -gt "$anchor" ] && anchor=$ack_mtime
+  age=$(( $(date +%s) - anchor ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+  if [ "$age" -ge "$resurface_secs" ] && [ "$rf_age" -ge "$resurface_secs" ]; then
+    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds, or run bin/fm-pause-ack.sh $task to defer the next recheck without waking the crew)"
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+  triage_log "absorbed stale (paused, awaiting external, age ${age}s, recheck ${resurface_secs}s): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -365,7 +386,7 @@ clear_pause_state() {  # <window>
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" "$STATE/.paused-ack-$key"
 }
 
 clear_pause_tracking() {  # <window>

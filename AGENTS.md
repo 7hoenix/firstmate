@@ -400,7 +400,7 @@ Then classify the shape:
 
 Then classify readiness:
 
-- **Dispatchable:** no overlap with in-flight tasks. Dispatch immediately. There is no concurrency cap.
+- **Dispatchable:** no overlap with in-flight tasks. Dispatch immediately. There is no hard concurrency cap, but bias toward queueing over parallel dispatch when tasks are not genuinely independent or time-critical: every extra live lane is a resident high-context session competing for the same supervision attention and quota, so serialize related or non-urgent work behind an in-flight task instead of fanning it all out at once.
 - **Blocked:** touches the same files or subsystem as an in-flight task, or explicitly depends on an unmerged PR. Record it in `data/backlog.md` with `blocked-by: <id>` and tell the captain what work is waiting and why. Scout tasks are read-mostly and almost never block on anything.
 
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
@@ -549,6 +549,8 @@ Do not substitute another harness's command shape for it.
 `bin/fm-watch.sh` classifies every wake in bash and absorbs the benign majority without waking you: crews with positive working evidence (an actively-running no-mistakes step for their branch, or a busy pane, read via `bin/fm-crew-state.sh`), a declared `paused:` external wait until its bounded recheck cadence, and no-change heartbeats.
 It never absorbs a crewmate that stopped without that evidence - whatever its stale status log claims - and only an actionable wake is queued durably and ends the supervision wait, so you resume the emitted protocol exactly once per actionable event.
 A `paused:` status is a deliberate external wait, not `blocked:`; its initial signal still surfaces once, and a forgotten pause re-surfaces for a recheck once per window.
+When a paused-recheck wake reaches you and you confirm the wait still holds, defer the next recheck a full window with `bin/fm-pause-ack.sh <id>` rather than steering the crew to re-append a line, which would cost a full-context turn on a resident high-context crew.
+A captain-gated lane that legitimately idles for hours (a merge or release gate) can declare a longer inline cadence with a `paused [recheck=<dur>]: <why>` token instead of the default hourly recheck.
 Repeated provably-working stale escalations on one unchanged pane eventually add `demand-deep-inspection` to the wake reason so it is not mistaken for another routine validation wait.
 `docs/architecture.md` ("Event-driven supervision") owns the full classification mechanism, its thresholds, and the shared classifier library; while `state/.afk` exists the daemon owns triage and the watcher surfaces every wake to it.
 At the start of every wake-handling turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.

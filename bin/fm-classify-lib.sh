@@ -59,6 +59,16 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# Bounds for a per-pause inline recheck cadence (see pause_recheck_secs). A declared
+# pause may carry an optional [recheck=<duration>] token to WIDEN its recheck window
+# past the fleet default - the captain-gated case, e.g. a merge/release lane that
+# legitimately idles for many hours and should not be rechecked hourly. The parsed
+# value is CLAMPED to this range so no token can nag faster than the floor (turning a
+# pause into a wedge) or push a recheck past the ceiling: a forgotten pause must still
+# re-surface within a day, the safety property both supervisors preserve. Overridable.
+FM_PAUSE_RECHECK_MIN_SECS_DEFAULT=300
+FM_PAUSE_RECHECK_MAX_SECS_DEFAULT=86400
+
 # The resolution verb that CLOSES a keyed decision opened by needs-decision or
 # blocked. See status_open_decisions below for the full durable-decision contract;
 # this is the one owner of the verb literal, overridable via FM_CLASSIFY_RESOLVE_VERB.
@@ -96,6 +106,50 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
+# Parse a compact duration token into seconds on stdout: a suffix of s/m/h/d
+# (45s, 30m, 8h, 2d) or a bare integer read as seconds. Non-zero on an
+# unparseable token so the caller can fall back to a default.
+_fm_parse_duration() {  # <token> -> seconds
+  local t=$1 num unit
+  case "$t" in ''|*[!0-9smhd]*) return 1 ;; esac
+  case "$t" in
+    *s) unit=1;     num=${t%s} ;;
+    *m) unit=60;    num=${t%m} ;;
+    *h) unit=3600;  num=${t%h} ;;
+    *d) unit=86400; num=${t%d} ;;
+    *)  unit=1;     num=$t ;;
+  esac
+  case "$num" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$(( num * unit ))"
+}
+
+# The per-pause recheck cadence in seconds. A declared pause line may carry an
+# optional [recheck=<duration>] token between the verb and the colon to WIDEN its
+# recheck window past the fleet default (FM_PAUSE_RESURFACE_SECS) - the captain-gated
+# lane, e.g. `paused [recheck=8h]: awaiting the release cut`. With no token, returns
+# that default so behavior is byte-identical to before. The parsed value is CLAMPED to
+# [FM_PAUSE_RECHECK_MIN_SECS, FM_PAUSE_RECHECK_MAX_SECS] so no crew-written token can
+# recheck faster than the floor or push past the ceiling (a forgotten pause must still
+# re-surface within a day). ONE owner for the token grammar; both supervisors read it here.
+pause_recheck_secs() {  # <status-line> -> seconds
+  local line=$1 prefix tok secs
+  local default=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  local min=${FM_PAUSE_RECHECK_MIN_SECS:-$FM_PAUSE_RECHECK_MIN_SECS_DEFAULT}
+  local max=${FM_PAUSE_RECHECK_MAX_SECS:-$FM_PAUSE_RECHECK_MAX_SECS_DEFAULT}
+  prefix=${line%%:*}
+  case "$prefix" in
+    *\[recheck=*\]*)
+      tok=${prefix#*\[recheck=}
+      tok=${tok%%\]*}
+      secs=$(_fm_parse_duration "$tok") || { printf '%s' "$default"; return; }
+      ;;
+    *) printf '%s' "$default"; return ;;
+  esac
+  [ "$secs" -lt "$min" ] && secs=$min
+  [ "$secs" -gt "$max" ] && secs=$max
+  printf '%s' "$secs"
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins
@@ -116,7 +170,7 @@ status_is_paused() {  # <status-line>
 # key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
-  v=${v%%\[key=*}
+  v=${v%%\[*}   # strip any bracket token(s) after the verb ([key=...], [recheck=...])
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
