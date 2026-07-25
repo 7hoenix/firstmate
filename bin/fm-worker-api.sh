@@ -78,6 +78,7 @@ resolve_paths() {
   ID=${ID%.api-tabs}
   [ -n "$ID" ] || die "cannot derive task id from registry path $REGISTRY"
   [ -n "$LOGDIR" ] || LOGDIR="$home_dir/data/api-logs"
+  mkdir -p "$state_dir" || die "cannot create registry dir $state_dir"
 }
 
 # --- self-location -----------------------------------------------------------
@@ -87,14 +88,14 @@ resolve_paths() {
 # in the default one -> "default"); tmux sets $TMUX and answers display-message.
 
 detect_backend_container() {
-  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_WORKSPACE_ID:-}" ]; then
-    BACKEND=herdr
-    CONTAINER="${HERDR_SESSION:-default}:$HERDR_WORKSPACE_ID"
-  elif [ -n "${TMUX:-}" ]; then
+  if [ -n "${TMUX:-}" ]; then
     BACKEND=tmux
     CONTAINER=$(tmux display-message -p '#{session_name}' 2>/dev/null) \
       || die "tmux display-message failed; cannot self-locate the container"
     [ -n "$CONTAINER" ] || die "tmux reported an empty session name"
+  elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_WORKSPACE_ID:-}" ]; then
+    BACKEND=herdr
+    CONTAINER="${HERDR_SESSION:-default}:$HERDR_WORKSPACE_ID"
   else
     die "unsupported backend: on-demand service tabs need tmux or herdr (v1). No HERDR_ENV/HERDR_WORKSPACE_ID or \$TMUX in this pane."
   fi
@@ -178,13 +179,24 @@ cmd_up() {  # <restart 0|1>
   fi
   # Close a prior same-label service before relaunching.
   if [ "$restart" = 1 ]; then
-    local prior endpoint b
+    local prior endpoint b reused_port
     prior=$(registry_line_for_label "$label" || true)
     if [ -n "$prior" ]; then
       b=$(printf '%s' "$prior" | cut -f2)
       endpoint=$(printf '%s' "$prior" | cut -f3)
+      reused_port=$(printf '%s' "$prior" | cut -f4)
       [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" 2>/dev/null || true
       registry_remove_label "$label"
+      # The tab is killed asynchronously; when we reuse its port, wait briefly for
+      # the old listener to release the socket so the relaunch binds deterministically.
+      if [ -n "$reused_port" ] && [ "$reused_port" = "$port" ]; then
+        local freed=0
+        for _ in 1 2 3 4 5; do
+          if port_is_free "$port"; then freed=1; break; fi
+          sleep 1
+        done
+        [ "$freed" = 1 ] || err "port $port still busy after 5s; relaunch may fail to bind"
+      fi
     fi
   fi
 
@@ -212,7 +224,13 @@ cmd_up() {  # <restart 0|1>
   endpoint=$(fm_backend_sibling_up "$BACKEND" "$CONTAINER" "$full_label" "$cwd" "$launch") \
     || die "failed to open the service tab on backend $BACKEND"
 
-  printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$BACKEND" "$endpoint" "$port" "$logfile" >> "$REGISTRY"
+  # The tab is live; if we cannot register it, teardown cannot reap it - so on a
+  # failed append, close the tab we just opened and fail loudly rather than leave
+  # an orphaned service.
+  if ! printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$BACKEND" "$endpoint" "$port" "$logfile" >> "$REGISTRY"; then
+    fm_backend_sibling_down "$BACKEND" "$endpoint" 2>/dev/null || true
+    die "opened the service tab but failed to record it in $REGISTRY; closed the tab to avoid an orphan"
+  fi
 
   # Bounded readiness wait: the port opening is the service-agnostic "it's up"
   # signal. Report either way (some services take longer to bind).

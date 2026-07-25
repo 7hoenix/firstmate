@@ -30,7 +30,7 @@ A crewmate pane carries no `FM_HOME` or task id, so the helper reads the contain
 - **herdr**: `HERDR_ENV=1` selects herdr; `HERDR_WORKSPACE_ID` is the worker's own workspace; the session is `${HERDR_SESSION:-default}` (herdr sets `HERDR_SESSION` in a named session, and omits it in the default one).
 - **tmux**: a non-empty `$TMUX` selects tmux; the session comes from `tmux display-message -p '#{session_name}'`.
 
-herdr is checked first: a tmux started inside a herdr pane sets both, and `$TMUX` then correctly wins for a nested tmux (matching `fm_backend_detect`).
+`$TMUX` is checked first: a tmux started inside a herdr pane sets both, and tmux then correctly wins for a nested tmux because the worker's shell lives in that tmux session (matching `fm_backend_detect`).
 Any other backend (zellij, cmux, orca) refuses `up` with a clear message - v1 supports tmux and herdr.
 
 ### The sibling tab
