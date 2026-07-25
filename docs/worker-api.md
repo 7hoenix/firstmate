@@ -63,6 +63,7 @@ This is **not** herdr lifecycle work: it only creates a tab in the worker's alre
 The port is a deterministic candidate from the worktree path (`FM_WORKER_API_PORT_BASE` default 8800, `+ cksum(worktree) mod FM_WORKER_API_PORT_RANGE` default 200), then the first free port at/above it, printed so it is targetable.
 `--port` pins an explicit value.
 `PORT` is exported into the service's shell; services that read a port from a flag should be passed one in the launch command (e.g. `wrangler dev --port "$PORT"`).
+The launch command runs as a shell line, so `$PORT`, pipes, and `&&` work, and multi-word arguments must be quoted as they would be for a shell.
 
 ### Logs are collected, not deleted
 

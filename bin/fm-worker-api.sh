@@ -126,16 +126,16 @@ worktree_seed() {
 
 # --- registry helpers --------------------------------------------------------
 
-registry_line_for_label() {  # <label>
+registry_line_for_label() {  # <label>  -- matches field 1 as a literal, not a regex
   [ -f "$REGISTRY" ] || return 1
-  grep -m1 "^$1"$'\t' "$REGISTRY" 2>/dev/null
+  awk -F'\t' -v l="$1" '$1==l {print; f=1; exit} END{exit !f}' "$REGISTRY" 2>/dev/null
 }
 
-registry_remove_label() {  # <label>
+registry_remove_label() {  # <label>  -- matches field 1 as a literal, not a regex
   [ -f "$REGISTRY" ] || return 0
   local tmp
   tmp="$REGISTRY.tmp.$$"
-  grep -v "^$1"$'\t' "$REGISTRY" > "$tmp" 2>/dev/null || true
+  awk -F'\t' -v l="$1" '$1!=l' "$REGISTRY" > "$tmp" 2>/dev/null || true
   mv "$tmp" "$REGISTRY"
 }
 
@@ -162,7 +162,7 @@ cmd_up() {  # <restart 0|1>
   if [ -f "$REGISTRY" ]; then
     local existing
     existing=$(registry_labels)
-    if printf '%s\n' "$existing" | grep -qx "$label"; then
+    if printf '%s\n' "$existing" | grep -Fqx -- "$label"; then
       [ "$restart" = 1 ] || restart=1  # same label -> replace
     elif [ -n "$existing" ]; then
       die "a service is already up for this worker (label(s): $(printf '%s' "$existing" | tr '\n' ' ')); v1 hosts one per worker - 'down' it first"
@@ -201,7 +201,9 @@ cmd_up() {  # <restart 0|1>
 
   # Tee the service output: the tab shows it live (visual stream) AND it appends
   # to a dated, searchable log (kept past teardown). PORT is exported so the
-  # service binds the chosen port.
+  # service binds the chosen port. The launch command is run as a shell line (so
+  # $PORT, pipes, and && work), so multi-word arguments must be quoted as they
+  # would be for a shell.
   local cwd launch endpoint
   cwd=$(pwd -P)
   launch="export PORT=$port; $(printf '%s ' "${UP_CMD[@]}")2>&1 | tee -a $(printf '%q' "$logfile")"
