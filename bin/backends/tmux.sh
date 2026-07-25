@@ -165,3 +165,29 @@ fm_backend_tmux_agent_alive() {  # <target>
     *) printf 'unknown' ;;
   esac
 }
+
+# fm_backend_tmux_sibling_up: open a sibling SERVICE window in <session> next to
+# a worker's own window and launch <cmd> in it (bin/fm-worker-api.sh; the visible
+# on-demand-API tab). A separate window - not a split of the agent's own window -
+# is what makes it independently watchable and hop-into-able. Pins the name off
+# automatic-rename exactly like fm_backend_tmux_create_task so a captain's tmux
+# config cannot rename it away from the reap-critical label. Prints the endpoint
+# "<session>:<window_id>" the reap registry records; fm_backend_tmux_sibling_down
+# closes it. Targets the session with a trailing colon so a non-default
+# base-index cannot collide.
+fm_backend_tmux_sibling_up() {  # <session> <label> <cwd> <cmd> -> prints "<session>:<window_id>"
+  local ses=$1 label=$2 cwd=$3 cmd=$4 wid
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$label" -c "$cwd") || return 1
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  tmux send-keys -t "$wid" "$cmd" Enter || return 1
+  printf '%s:%s\n' "$ses" "$wid"
+}
+
+# fm_backend_tmux_sibling_down: close a service window created by
+# fm_backend_tmux_sibling_up, given its "<session>:<window_id>" endpoint.
+# kill-window kills every pane in the window, so the hosted server process dies
+# with it. Best-effort, mirroring fm_backend_tmux_kill.
+fm_backend_tmux_sibling_down() {  # <endpoint "session:window_id">
+  fm_backend_tmux_kill "${1#*:}"
+}

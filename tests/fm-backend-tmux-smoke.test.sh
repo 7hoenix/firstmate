@@ -137,5 +137,25 @@ fi
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
 
+# --- sibling_up / sibling_down (bin/fm-worker-api.sh's on-demand service tab) --
+# A separate labeled window next to a worker, launching a command, then reaped.
+SIB=$(fm_backend_tmux_sibling_up "$SESSION" "fm-smoke1-api" "$HOME" "echo sibling-up-ok") \
+  || fail "fm_backend_tmux_sibling_up failed"
+case "$SIB" in "$SESSION":*) : ;; *) fail "sibling_up should print a session:window_id endpoint, got '$SIB'" ;; esac
+tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "fm-smoke1-api" \
+  || fail "sibling_up did not create the labeled service window"
+sleep 0.3
+sib_out=$(fm_backend_tmux_capture "$SIB" 20) || fail "capture of the sibling window failed"
+case "$sib_out" in
+  *sibling-up-ok*) : ;;
+  *) fail "sibling_up did not run the launch command"$'\n'"$sib_out" ;;
+esac
+fm_backend_tmux_sibling_down "$SIB"
+if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "fm-smoke1-api"; then
+  fail "sibling_down did not close the service window"
+fi
+fm_backend_tmux_sibling_down "$SIB" || fail "sibling_down on an already-gone window must stay best-effort"
+pass "real tmux: sibling_up opens a labeled service window and runs the command; sibling_down closes it (best-effort)"
+
 cleanup_all
 trap - EXIT

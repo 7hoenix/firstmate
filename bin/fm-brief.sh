@@ -233,6 +233,18 @@ EOF
 )
 fi
 
+# Always-present pointer for standing up a long-lived service in a visible,
+# self-reaped tab instead of a sub-agent or a background process. The need is
+# often discovered mid-task, so it rides every ship and scout brief.
+WORKER_API_SECTION=$(cat <<EOF
+# Live services (API / dev server / mock)
+If you need a long-lived service running while you work (e.g. \`wrangler dev\`, a mock API, \`vite\`), do NOT start it in a sub-agent or a background \`&\`: a sub-agent is meant to finish and return, and a background process is invisible to the captain.
+Run it through the worker-API helper: \`$FM_ROOT/bin/fm-worker-api.sh up -- <your launch command>\`.
+It opens the service in a visible, named tab in your own workspace the captain can watch and hop into, picks a free port and prints it, tees output to a searchable dated log, and is reaped automatically at teardown.
+Manage it with \`$FM_ROOT/bin/fm-worker-api.sh status\`, \`... restart\`, and \`... down\`; v1 hosts one service per worker.
+EOF
+)
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -241,6 +253,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$WORKER_API_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -347,6 +361,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$WORKER_API_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

@@ -1455,3 +1455,41 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   [ "$reader_rc" -eq 0 ] && return 1
   return 2
 }
+
+# fm_backend_herdr_sibling_up: open a sibling SERVICE tab in the worker's OWN
+# per-task workspace and launch <cmd> in it (bin/fm-worker-api.sh; the visible
+# on-demand-API tab). <container> is "<session>:<workspace_id>" - the worker's own
+# workspace, which the helper reads from the HERDR_WORKSPACE_ID env herdr injects
+# into every pane. A labeled tab in that workspace is a distinct, watchable entry
+# in the spaces sidebar. `pane run` submits <cmd> atomically. Prints the endpoint
+# "<session>:<pane_id>" the reap registry records; fm_backend_herdr_sibling_down
+# closes it. NOT lifecycle work: this only creates a tab in an already-live
+# workspace, exactly like fm_backend_herdr_create_task, so it needs no herdr-lab
+# isolation.
+fm_backend_herdr_sibling_up() {  # <container "session:workspace_id"> <label> <cwd> <cmd> -> prints "<session>:<pane_id>"
+  local container=$1 label=$2 cwd=$3 cmd=$4 session wsid out tab_id pane_id
+  session=${container%%:*}
+  wsid=${container#*:}
+  if [ -z "$session" ] || [ -z "$wsid" ] || [ "$wsid" = "$container" ]; then
+    echo "error: fm_backend_herdr_sibling_up needs a 'session:workspace_id' container, got '$container'" >&2
+    return 1
+  fi
+  fm_backend_herdr_server_ensure "$session" || return 1
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    echo "error: herdr sibling tab create returned no tab/pane id" >&2
+    return 1
+  fi
+  fm_backend_herdr_send_text_line "$session:$pane_id" "$cmd" || return 1
+  printf '%s:%s\n' "$session" "$pane_id"
+}
+
+# fm_backend_herdr_sibling_down: close a service tab created by
+# fm_backend_herdr_sibling_up, given its "<session>:<pane_id>" endpoint. Closing
+# a tab's only pane closes the tab, and the hosted server process dies with the
+# pane. Best-effort, mirroring fm_backend_herdr_kill (which it reuses).
+fm_backend_herdr_sibling_down() {  # <endpoint "session:pane_id">
+  fm_backend_herdr_kill "$1"
+}

@@ -1032,6 +1032,20 @@ fi
 
 if [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  # Close any worker-hosted service tabs this task opened (bin/fm-worker-api.sh),
+  # so a visible on-demand-API tab and its server process are reaped and never
+  # orphaned. Done BEFORE the workspace reap so that on herdr, closing the API
+  # pane empties the per-task workspace and the reap below can then close it. The
+  # dated log the service wrote is deliberately KEPT (the captain collects logs;
+  # bulk-pruned later via fm-worker-api.sh logs --prune-before); only the tab and
+  # its process are reaped here.
+  API_REGISTRY="$STATE/$ID.api-tabs"
+  if [ -f "$API_REGISTRY" ]; then
+    while IFS=$'\t' read -r _api_label api_backend api_endpoint _api_port _api_log; do
+      [ -n "$api_endpoint" ] || continue
+      fm_backend_sibling_down "$api_backend" "$api_endpoint" 2>/dev/null || true
+    done < "$API_REGISTRY"
+  fi
   # P4 (herdr workspace-per-task): after killing the task's pane, close its own
   # now-empty per-task workspace. No-op for every other backend, and for herdr
   # it never closes the legacy shared per-home workspace or one holding other
@@ -1048,7 +1062,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+# The worker-API reap registry is removed (the tabs it tracked are closed above);
+# the dated logs it points to live under data/api-logs/ and are deliberately kept.
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.api-tabs"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
