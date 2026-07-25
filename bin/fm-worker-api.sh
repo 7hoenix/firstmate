@@ -56,8 +56,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 err() { echo "fm-worker-api: $*" >&2; }
 die() { err "$*"; exit 1; }
+require_val() { [ "$#" -ge 2 ] || die "$1 needs a value"; }
 
-usage() { sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # --- registry / log location -------------------------------------------------
 
@@ -309,9 +310,9 @@ LOGS_PRUNE_BEFORE=
 parse_common_flag() {  # returns 0 if consumed; sets shift count in FLAG_SHIFT
   FLAG_SHIFT=0
   case "$1" in
-    --registry) REGISTRY=${2:-}; FLAG_SHIFT=2 ;;
+    --registry) require_val "$@"; REGISTRY=${2:-}; FLAG_SHIFT=2 ;;
     --registry=*) REGISTRY=${1#--registry=}; FLAG_SHIFT=1 ;;
-    --logdir) LOGDIR=${2:-}; FLAG_SHIFT=2 ;;
+    --logdir) require_val "$@"; LOGDIR=${2:-}; FLAG_SHIFT=2 ;;
     --logdir=*) LOGDIR=${1#--logdir=}; FLAG_SHIFT=1 ;;
     *) return 1 ;;
   esac
@@ -326,9 +327,9 @@ case "$CMD" in
     while [ "$#" -gt 0 ]; do
       if parse_common_flag "$@"; then shift "$FLAG_SHIFT"; continue; fi
       case "$1" in
-        --label) UP_LABEL=${2:-}; shift 2 ;;
+        --label) require_val "$@"; UP_LABEL=${2:-}; shift 2 ;;
         --label=*) UP_LABEL=${1#--label=}; shift ;;
-        --port) UP_PORT=${2:-}; shift 2 ;;
+        --port) require_val "$@"; UP_PORT=${2:-}; shift 2 ;;
         --port=*) UP_PORT=${1#--port=}; shift ;;
         --) shift; UP_CMD=("$@"); break ;;
         --*) die "unknown flag for $CMD: $1" ;;
@@ -342,7 +343,7 @@ case "$CMD" in
     while [ "$#" -gt 0 ]; do
       if parse_common_flag "$@"; then shift "$FLAG_SHIFT"; continue; fi
       case "$1" in
-        --label) DOWN_LABEL=${2:-}; shift 2 ;;
+        --label) require_val "$@"; DOWN_LABEL=${2:-}; shift 2 ;;
         --label=*) DOWN_LABEL=${1#--label=}; shift ;;
         *) die "unknown flag for down: $1" ;;
       esac
@@ -360,10 +361,10 @@ case "$CMD" in
     while [ "$#" -gt 0 ]; do
       if parse_common_flag "$@"; then shift "$FLAG_SHIFT"; continue; fi
       case "$1" in
-        --label) LOGS_LABEL=${2:-}; shift 2 ;;
+        --label) require_val "$@"; LOGS_LABEL=${2:-}; shift 2 ;;
         --label=*) LOGS_LABEL=${1#--label=}; shift ;;
         --follow|-f) LOGS_FOLLOW=1; shift ;;
-        --prune-before) LOGS_PRUNE_BEFORE=${2:-}; shift 2 ;;
+        --prune-before) require_val "$@"; LOGS_PRUNE_BEFORE=${2:-}; shift 2 ;;
         --prune-before=*) LOGS_PRUNE_BEFORE=${1#--prune-before=}; shift ;;
         *) die "unknown flag for logs: $1" ;;
       esac
