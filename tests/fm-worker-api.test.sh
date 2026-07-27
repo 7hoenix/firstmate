@@ -405,14 +405,24 @@ pass "real tmux: a previous run's exit marker in a shared log does not fail a he
 REG_CLAIM_A="$HOME_DIR/state/claimer.api-tabs"
 REG_CLAIM_B="$HOME_DIR/state/claimee.api-tabs"
 printf 'api\ttmux\tfirstmate:@900\t8887\t%s\n' "$LOGDIR/claim.log" > "$REG_CLAIM_A"
+# Only a LIVE task's claim counts, so the claimer needs a meta.
+fm_write_meta "$HOME_DIR/state/claimer.meta" "window=firstmate:@900" "backend=tmux" "kind=ship"
 claim_rc=0
 claim_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
   "$WAPI" up --registry "$REG_CLAIM_B" --port 8887 -- python3 -m http.server 8887 2>&1) || claim_rc=$?
 [ "$claim_rc" -ne 0 ] || fail "up must refuse a port another task's registry already claims, got:"$'\n'"$claim_out"
 assert_contains "$claim_out" "already claimed" "the refusal should say the port is claimed by another task"
 assert_absent "$REG_CLAIM_B" "a refused up must not register anything"
+# An ORPHANED task's claim must not reserve a port indefinitely: with the meta
+# gone, the same port is available again (its registry is waiting for `sweep`).
+rm -f "$HOME_DIR/state/claimer.meta"
+orphan_claim_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_CLAIM_B" --port 8887 -- python3 -m http.server 8887 2>&1) \
+  || fail "an orphaned task's claim must not block the port, got:"$'\n'"$orphan_claim_out"
+assert_contains "$orphan_claim_out" "http://127.0.0.1:8887" "the port should be usable once the claiming task is gone"
+wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_CLAIM_B" --all >/dev/null 2>&1 || true
 rm -f "$REG_CLAIM_A"
-pass "real tmux: up refuses a port already claimed by another task's registry"
+pass "real tmux: up refuses a live task's port claim but not an orphaned task's"
 
 # --- a provably dead service does not block the worker's one slot ------------
 # The one-service-per-worker refusal used to be liveness-blind, so a crashed

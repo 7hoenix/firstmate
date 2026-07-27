@@ -207,12 +207,17 @@ trap port_lock_release EXIT
 # whose service has not bound yet - the gap the port lock cannot cover once a slow
 # service outlasts the readiness wait. The registries in this state dir are the
 # durable record of those claims, so consult them too.
-port_is_claimed() {  # <port> -> 0 when another task's registry already records it
-  local p=$1 reg
+port_is_claimed() {  # <port> -> 0 when another LIVE task's registry already records it
+  local p=$1 reg id
   [ -n "$STATE_DIR" ] || return 1
   for reg in "$STATE_DIR"/*.api-tabs; do
     [ -e "$reg" ] || continue
     [ "$reg" = "$REGISTRY" ] && continue
+    # Ignore an orphaned task's claim. Its registry is waiting for `sweep`, and
+    # honoring it would refuse this port until the next session start - a dead
+    # task must not be able to reserve a port indefinitely.
+    id=$(basename "$reg"); id=${id%.api-tabs}
+    [ -f "$STATE_DIR/$id.meta" ] || continue
     cut -f4 "$reg" 2>/dev/null | grep -qx -- "$p" && return 0
   done
   return 1

@@ -116,6 +116,7 @@ Failing to take the lock never blocks a launch; it only forfeits the race protec
 
 A socket probe cannot see a port that another worker has *claimed* but whose service has not bound yet - the case where a slow service outlasts the readiness wait and the lock is released anyway.
 So port selection also consults every `state/*.api-tabs` in the state dir as the durable claim record, and both the derived and the pinned path skip or refuse a port another task already records.
+Only a **live** task's claim counts: a registry whose task has no `state/<id>.meta` is waiting for `sweep`, and honoring its claim would let a dead task reserve a port until the next session start.
 
 **Residual risk**: an unrelated process (nothing to do with firstmate) can still grab the port between the free check and the service's own bind.
 Readiness is a bare TCP connect, not a health check, so a service that binds the port but is not yet answering requests still reads as up.
