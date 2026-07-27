@@ -628,6 +628,26 @@ fm_backend_sibling_down() {  # <backend> <endpoint>
   esac
 }
 
+# fm_backend_sibling_alive: existence of a service tab/window created by
+# fm_backend_sibling_up. Three-valued via exit status, so a caller can act on a
+# CONFIDENT "gone" without ever acting on "I could not tell":
+#   0 - alive
+#   1 - confidently gone
+#   2 - unknown (unreadable server/session, or a backend with no service tabs)
+# This is deliberately separate from fm_backend_target_exists, whose tmux arm
+# uses `display-message` and therefore cannot report a window as gone at all
+# (see bin/backends/tmux.sh's fm_backend_tmux_sibling_alive for the evidence).
+fm_backend_sibling_alive() {  # <backend> <endpoint>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 2
+  case "$backend" in
+    tmux) fm_backend_tmux_sibling_alive "$@" ;;
+    herdr) fm_backend_herdr_sibling_alive "$@" ;;
+    *) return 2 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

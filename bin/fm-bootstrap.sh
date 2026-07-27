@@ -14,6 +14,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
+#                 "WORKER_API_SWEEP: <id>: closed <n> orphaned service tab(s) ...",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate task selectors
 #          (fm-<id>) whose worktree was fast-forwarded to firstmate's own
@@ -38,6 +39,13 @@
 #          reading would spin up a duplicate agent). Session-start scope only;
 #          see AGENTS.md "Session start" and docs/tmux-backend.md /
 #          docs/herdr-backend.md "Agent liveness probe" for the empirical basis.
+#          A WORKER_API_SWEEP line reports worker-hosted service tabs
+#          (bin/fm-worker-api.sh) closed because the task that opened them is
+#          gone - no state/<id>.meta - so teardown can never reap them. Teardown
+#          is the normal reaper; this sweep is the recovery-side backstop for a
+#          task that crashed, lost its meta, or was force-discarded. Registries
+#          belonging to live tasks are left untouched, so a healthy fleet is
+#          silent. The dated logs are kept, exactly as at teardown.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -65,9 +73,9 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the four MUTATING sweeps
-#          (secondmate_sync, secondmate_liveness_sweep, x_mode_setup,
-#          fleet_sync) while still printing every read-only detect line
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          (secondmate_sync, secondmate_liveness_sweep, worker_api_sweep,
+#          x_mode_setup, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -308,6 +316,25 @@ secondmate_liveness_sweep() {
         ;;
     esac
   done
+  return 0
+}
+
+# Close worker-hosted service tabs whose task is gone. Teardown reaps a task's
+# service tabs on the normal path; nothing reaps them when a task never reaches
+# teardown, so without this backstop a crashed or force-discarded task leaks a
+# live tab and its server process indefinitely. bin/fm-worker-api.sh owns the
+# decision of what counts as orphaned; this only relays its output. Best-effort
+# and silent on a healthy fleet, exactly like the other sweeps.
+worker_api_sweep() {
+  [ -d "$STATE" ] || return 0
+  local tmp line
+  tmp=$(mktemp) || return 0
+  "$SCRIPT_DIR/fm-worker-api.sh" sweep --state "$STATE" >"$tmp" 2>/dev/null || true
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "WORKER_API_SWEEP: $line"
+  done < "$tmp"
+  rm -f "$tmp"
   return 0
 }
 
@@ -632,6 +659,7 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep
+  worker_api_sweep
   x_mode_setup
   fleet_sync
 fi

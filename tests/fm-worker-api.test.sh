@@ -19,6 +19,11 @@ WAPI="$ROOT/bin/fm-worker-api.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worker-api)
 
+# The port lock is machine-wide by design (concurrent `up`s in different repos
+# must serialize); point it into the temp root so the suite never contends with a
+# real worker or with a parallel test run.
+export FM_WORKER_API_PORT_LOCK="$TMP_ROOT/portlock"
+
 # Strip every backend-selecting env var so each test controls detection.
 clean_env() {
   env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_SESSION -u HERDR_PANE_ID \
@@ -53,6 +58,22 @@ test_unsupported_backend_dies() {
   pass "fm-worker-api.sh: up refuses when neither tmux nor herdr is detectable"
 }
 
+# cmux is out of v1 scope, and the worry was that it might be mis-detected as
+# tmux. It cannot be: cmux marks its panes with CMUX_WORKSPACE_ID and never sets
+# $TMUX (docs/cmux-backend.md). A $TMUX that IS present inside a cmux tab belongs
+# to a real nested tmux, which is genuinely the innermost layer and correctly
+# wins - the same order fm_backend_detect uses.
+test_cmux_pane_is_not_mistaken_for_tmux() {
+  local reg="$TMP_ROOT/state-cmux/task-cm.api-tabs" out rc=0
+  mkdir -p "$(dirname "$reg")"
+  out=$(clean_env CMUX_WORKSPACE_ID=ws-1 CMUX_TAB_ID=tab-1 \
+    "$WAPI" up --registry "$reg" -- echo hi 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a cmux pane must refuse up in v1, not be treated as tmux"
+  assert_contains "$out" "tmux or herdr" "the cmux refusal should name the v1 backends"
+  assert_absent "$reg" "a refused up must not register anything"
+  pass "fm-worker-api.sh: a cmux pane refuses up instead of being mis-detected as tmux"
+}
+
 test_down_when_nothing_registered() {
   local reg="$TMP_ROOT/state-empty/task-b.api-tabs" out
   mkdir -p "$(dirname "$reg")"
@@ -84,12 +105,131 @@ test_prune_before_rejects_bad_date() {
   pass "fm-worker-api.sh: logs --prune-before rejects a malformed date"
 }
 
+# A date of the right SHAPE that no find implementation can parse must be an
+# error. The shape check alone used to be the only gate, and the delete was
+# `|| true`, so an unparseable date printed "pruned 0 log file(s)" and exited 0 -
+# a false success that silently kept every log the captain asked to prune.
+test_prune_before_rejects_unparseable_date() {
+  local reg="$TMP_ROOT/state-unparseable/task-u.api-tabs" logdir="$TMP_ROOT/logs-unparseable" out rc=0
+  mkdir -p "$(dirname "$reg")" "$logdir"
+  : > "$logdir/task-u-api-2020-01-01-000000.log"
+  out=$(clean_env "$WAPI" logs --registry "$reg" --logdir "$logdir" --prune-before 9999-99-99 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unparseable prune date must fail, got a success:"$'\n'"$out"
+  assert_contains "$out" "cannot parse the date" "the error should name the unparseable date"
+  assert_present "$logdir/task-u-api-2020-01-01-000000.log" "a failed prune must not delete anything"
+  pass "fm-worker-api.sh: logs --prune-before errors on a shape-valid but unparseable date"
+}
+
+# Portable invariant across find flavors: BSD/macOS find REJECTS a far-future
+# date that GNU find accepts. Either behavior is fine; reporting success without
+# actually pruning is not.
+test_prune_before_far_future_is_never_a_false_success() {
+  local reg="$TMP_ROOT/state-future/task-f.api-tabs" logdir="$TMP_ROOT/logs-future" old rc=0
+  mkdir -p "$(dirname "$reg")" "$logdir"
+  old="$logdir/task-f-api-2020-01-01-000000.log"
+  : > "$old"
+  touch -t 202001010000 "$old"
+  clean_env "$WAPI" logs --registry "$reg" --logdir "$logdir" --prune-before 2999-01-01 >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    assert_absent "$old" "prune reported success, so the older log must actually be gone"
+  else
+    assert_present "$old" "prune failed, so it must not have deleted anything"
+  fi
+  pass "fm-worker-api.sh: a far-future prune date either prunes or errors, never a false success"
+}
+
+test_sweep_leaves_a_live_task_alone() {
+  local state="$TMP_ROOT/state-sweep-live" out
+  mkdir -p "$state"
+  printf 'api\tzellij\tses:p1\t8899\t/nonexistent.log\n' > "$state/alive.api-tabs"
+  fm_write_meta "$state/alive.meta" "window=ses:w1" "backend=zellij"
+  out=$(clean_env "$WAPI" sweep --state "$state" 2>&1) || fail "sweep exited non-zero"
+  assert_present "$state/alive.api-tabs" "sweep must not touch a registry whose task is still live"
+  [ -z "$out" ] || fail "sweep should stay silent for a healthy fleet, got: $out"
+  pass "fm-worker-api.sh: sweep leaves a live task's registry alone and stays silent"
+}
+
+test_sweep_clears_an_orphaned_registry() {
+  local state="$TMP_ROOT/state-sweep-orphan" out
+  mkdir -p "$state"
+  # No <id>.meta -> the task is gone, so nothing will ever reap this registry.
+  printf 'api\tzellij\tses:p1\t8899\t/nonexistent.log\n' > "$state/ghost.api-tabs"
+  out=$(clean_env "$WAPI" sweep --state "$state" 2>&1) || fail "sweep exited non-zero"
+  assert_contains "$out" "ghost" "sweep should name the orphaned task"
+  assert_absent "$state/ghost.api-tabs" "sweep should remove the orphaned registry"
+  pass "fm-worker-api.sh: sweep closes and clears an orphaned task's registry"
+}
+
+test_sweep_dry_run_changes_nothing() {
+  local state="$TMP_ROOT/state-sweep-dry" out
+  mkdir -p "$state"
+  printf 'api\tzellij\tses:p1\t8899\t/nonexistent.log\n' > "$state/ghost.api-tabs"
+  out=$(clean_env "$WAPI" sweep --state "$state" --dry-run 2>&1) || fail "sweep --dry-run exited non-zero"
+  assert_contains "$out" "would close" "dry-run should describe what it would do"
+  assert_present "$state/ghost.api-tabs" "dry-run must not remove the registry"
+  pass "fm-worker-api.sh: sweep --dry-run reports without changing anything"
+}
+
+test_status_all_spans_registries() {
+  local state="$TMP_ROOT/state-status-all" out
+  mkdir -p "$state"
+  printf 'api\tzellij\tses:p1\t8899\t/nonexistent.log\n' > "$state/one.api-tabs"
+  printf 'api\tzellij\tses:p2\t8898\t/nonexistent.log\n' > "$state/two.api-tabs"
+  out=$(clean_env "$WAPI" status --registry "$state/one.api-tabs" --all 2>&1) || fail "status --all exited non-zero"
+  assert_contains "$out" "one" "status --all should list the first task"
+  assert_contains "$out" "two" "status --all should list the other task's registry too"
+  pass "fm-worker-api.sh: status --all spans every registry in the state dir"
+}
+
+test_down_all_clears_the_registry() {
+  local reg="$TMP_ROOT/state-downall/task-z.api-tabs" out
+  mkdir -p "$(dirname "$reg")"
+  printf 'api\tzellij\tses:p1\t8899\t/nonexistent.log\n' > "$reg"
+  printf 'mock\tzellij\tses:p2\t8898\t/nonexistent.log\n' >> "$reg"
+  out=$(clean_env "$WAPI" down --registry "$reg" --all 2>&1) || fail "down --all exited non-zero"
+  assert_contains "$out" "'api' stopped" "down --all should report each stopped service"
+  assert_contains "$out" "'mock' stopped" "down --all should report every label"
+  [ ! -s "$reg" ] || fail "down --all should leave the registry empty, got: $(cat "$reg")"
+  pass "fm-worker-api.sh: down --all stops every registered label and empties the registry"
+}
+
+# An unbreakable stale lock (a regular file, a non-empty dir, another user's lock
+# in a shared /tmp) used to spin the acquire loop with no sleep and no timeout:
+# `up` hung forever at full CPU. The contract is that a lock problem delays a
+# launch at worst, never blocks it.
+test_port_lock_never_hangs_on_an_unbreakable_stale_lock() {
+  local reg="$TMP_ROOT/state-lockspin/task-l.api-tabs" lock="$TMP_ROOT/lockspin-lock" out rc=0 start elapsed
+  mkdir -p "$(dirname "$reg")"
+  # A regular FILE where the lock dir goes: mkdir always fails, rmdir can never
+  # clear it, and it is old enough to read as stale.
+  : > "$lock"
+  touch -t 202001010000 "$lock"
+  start=$(date +%s)
+  out=$(clean_env FM_WORKER_API_PORT_LOCK="$lock" FM_WORKER_API_PORT_LOCK_WAIT=2 \
+    "$WAPI" up --registry "$reg" -- echo hi 2>&1) || rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  # It must reach the backend check (and refuse there) rather than spin in the lock.
+  [ "$rc" -ne 0 ] || fail "expected the unsupported-backend refusal after the lock wait"
+  assert_contains "$out" "tmux or herdr" "the run should have proceeded past the lock to the backend check"
+  [ "$elapsed" -lt 30 ] || fail "acquiring an unbreakable stale lock took ${elapsed}s; it should bail out after the short wait"
+  pass "fm-worker-api.sh: an unbreakable stale port lock bails out instead of spinning forever"
+}
+
 test_help_renders
+test_port_lock_never_hangs_on_an_unbreakable_stale_lock
 test_up_without_registry_dies
 test_unsupported_backend_dies
+test_cmux_pane_is_not_mistaken_for_tmux
 test_down_when_nothing_registered
 test_logs_prune_before
 test_prune_before_rejects_bad_date
+test_prune_before_rejects_unparseable_date
+test_prune_before_far_future_is_never_a_false_success
+test_sweep_leaves_a_live_task_alone
+test_sweep_clears_an_orphaned_registry
+test_sweep_dry_run_changes_nothing
+test_status_all_spans_registries
+test_down_all_clears_the_registry
 
 # --- real-tmux integration ---------------------------------------------------
 
@@ -115,6 +255,11 @@ trap tmux_cleanup EXIT
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s firstmate -n fm-inttask -x 200 -y 50 \
   || fail "could not start the private tmux server"
+# A window teardown will never kill, so the session (and this private server)
+# outlives the teardown cases below. Without it the server exits when the last
+# window dies and every later case fails to self-locate a container.
+"$REAL_TMUX" -L "$SOCKET" new-window -d -t firstmate: -n keepalive \
+  || fail "could not create the keepalive window"
 
 # The helper's backend issues bare `tmux ...`; point them (and backend detection)
 # at the private server by exporting a $TMUX naming its socket. tmux -L uses a
@@ -169,11 +314,129 @@ assert_grep "8894" "$REG" "restart without --port should reuse the recorded port
 [ "$(wc -l < "$REG" | tr -d ' ')" = "1" ] || fail "restart should leave exactly one registry line"
 pass "real tmux: restart reuses the recorded port and leaves one registry line"
 
+# --- the startup banner survives on stdout -----------------------------------
+# python3 -m http.server prints "Serving HTTP on ..." to STDOUT, which is fully
+# buffered when it is a pipe: the banner sat in the process's own buffer and was
+# lost when teardown killed it, so the log - firstmate's readiness source - never
+# saw it. The launch line now runs the command line-buffered.
+CURRENT_LOG=$(cut -f5 "$REG")   # the restart above rotated to a new dated log
+banner_seen=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if grep -q "Serving HTTP" "$CURRENT_LOG" 2>/dev/null; then banner_seen=1; break; fi
+  sleep 1
+done
+[ "$banner_seen" = 1 ] \
+  || fail "the service's stdout banner never reached the log (lost to full buffering):"$'\n'"$(cat "$CURRENT_LOG")"
+pass "real tmux: the service's stdout startup banner reaches the dated log"
+
+# --- a pinned port that is already taken is refused --------------------------
+# Readiness is "something is listening on the port", so launching onto an
+# occupied port reported a healthy service while the real one died with
+# "address already in use". :8894 is live from the up/restart above.
+REG_TAKEN="$HOME_DIR/state/takenport.api-tabs"
+taken_rc=0
+taken_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_TAKEN" --port 8894 -- python3 -m http.server 8894 2>&1) || taken_rc=$?
+[ "$taken_rc" -ne 0 ] || fail "up onto an already-taken pinned port must refuse, got:"$'\n'"$taken_out"
+assert_contains "$taken_out" "already in use" "the refusal should name the port conflict"
+assert_absent "$REG_TAKEN" "a refused up must not register anything"
+pass "real tmux: up refuses a pinned port that is already in use"
+
+# --- a launch command that exits immediately fails fast ----------------------
+# The command runs as a shell line, so a typo or a bad quote just exits. That
+# used to stall the full readiness timeout and then report "not yet accepting".
+REG_DEAD="$HOME_DIR/state/deadcmd.api-tabs"
+dead_rc=0
+dead_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_DEAD" --port 8891 -- fm-no-such-binary-xyz 2>&1) || dead_rc=$?
+[ "$dead_rc" -ne 0 ] || fail "up must fail when the launch command exits immediately, got:"$'\n'"$dead_out"
+assert_contains "$dead_out" "API FAILED" "an immediately-exiting command should report a failure, not a slow start"
+# A failed launch must leave NO residue: a registered-but-dead service would show
+# up in status as down and consume the worker's single slot.
+[ ! -s "$REG_DEAD" ] || fail "a failed up must not leave a registry line, got: $(cat "$REG_DEAD")"
+sleep 1
+if "$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' 2>/dev/null | grep -qx "fm-deadcmd-api"; then
+  fail "a failed up must close the tab it opened"
+fi
+pass "real tmux: up fails fast when the launch command exits, leaving no tab and no registry line"
+
+# --- a service whose TAB was killed is cleared -------------------------------
+# The tab-gone half of the liveness check. It needs a existence probe that can
+# actually report a window as gone: `tmux display-message -t <dead window>` exits
+# 0 and prints the session's current pane, so the generic target-exists check
+# reports every tmux endpoint as alive.
+REG_KILLED="$HOME_DIR/state/killedtab.api-tabs"
+kt_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_KILLED" --label alpha --port 8898 -- python3 -m http.server 8898 2>&1) \
+  || fail "up failed for the killed-tab case"$'\n'"$kt_out"
+KT_ENDPOINT=$(cut -f3 "$REG_KILLED")
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "${KT_ENDPOINT#*:}" 2>/dev/null || true
+sleep 2
+kt2_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_KILLED" --label beta --port 8899 -- python3 -m http.server 8899 2>&1) \
+  || fail "up should proceed after the prior service's tab was killed, got:"$'\n'"$kt2_out"
+assert_contains "$kt2_out" "cleared stale service" "a service whose tab is gone should be cleared, not block the slot"
+assert_contains "$kt2_out" "http://127.0.0.1:8899" "the new service should then start"
+wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_KILLED" --all >/dev/null 2>&1 || true
+pass "real tmux: a service whose tab was killed is cleared instead of blocking the worker's slot"
+
+# --- a stale exit marker cannot kill a healthy launch ------------------------
+# Two runs of the same label inside one second share a log filename, and `tee -a`
+# appends. If readiness grepped the whole file, the PREVIOUS run's exit marker
+# would read as this run's failure - and the failure path now closes the tab and
+# unregisters, so a stale match would actively kill a working service.
+REG_STAMP="$HOME_DIR/state/stamp.api-tabs"
+mkdir -p "$LOGDIR"
+# Seed a stale-marker log for every second `up` could stamp, so the collision is
+# deterministic rather than a race against the clock.
+for _stamp in $(perl -e 'use POSIX; print strftime("%Y-%m-%d-%H%M%S", localtime(time()+$_)), "\n" for 0..20'); do
+  printf 'old run output\n[fm-worker-api] service exited rc=1\n' > "$LOGDIR/stamp-api-$_stamp.log"
+done
+stamp_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_STAMP" --port 8886 -- python3 -m http.server 8886 2>&1) \
+  || fail "up must not treat a prior run's exit marker as its own failure:"$'\n'"$stamp_out"
+assert_contains "$stamp_out" "http://127.0.0.1:8886" "the healthy service should come up despite a stale marker in an older log"
+wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_STAMP" --all >/dev/null 2>&1 || true
+pass "real tmux: a previous run's exit marker in a shared log does not fail a healthy launch"
+
+# --- a port another task has claimed is refused ------------------------------
+# A socket probe cannot see a port claimed by a worker whose service has not bound
+# yet, so the registries in the state dir are consulted as the durable claim record.
+REG_CLAIM_A="$HOME_DIR/state/claimer.api-tabs"
+REG_CLAIM_B="$HOME_DIR/state/claimee.api-tabs"
+printf 'api\ttmux\tfirstmate:@900\t8887\t%s\n' "$LOGDIR/claim.log" > "$REG_CLAIM_A"
+claim_rc=0
+claim_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_CLAIM_B" --port 8887 -- python3 -m http.server 8887 2>&1) || claim_rc=$?
+[ "$claim_rc" -ne 0 ] || fail "up must refuse a port another task's registry already claims, got:"$'\n'"$claim_out"
+assert_contains "$claim_out" "already claimed" "the refusal should say the port is claimed by another task"
+assert_absent "$REG_CLAIM_B" "a refused up must not register anything"
+rm -f "$REG_CLAIM_A"
+pass "real tmux: up refuses a port already claimed by another task's registry"
+
+# --- a provably dead service does not block the worker's one slot ------------
+# The one-service-per-worker refusal used to be liveness-blind, so a crashed
+# service blocked every later up until someone ran `down` by hand.
+REG_STALE="$HOME_DIR/state/stale.api-tabs"
+printf 'api\ttmux\tfirstmate:@999\t8892\t%s\n' "$LOGDIR/stale-marker.log" > "$REG_STALE"
+mkdir -p "$LOGDIR"
+echo "[fm-worker-api] service exited rc=1" > "$LOGDIR/stale-marker.log"
+stale_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_STALE" --label fresh --port 8893 -- python3 -m http.server 8893 2>&1) \
+  || fail "up should proceed once the dead service is cleared, got:"$'\n'"$stale_out"
+assert_contains "$stale_out" "cleared stale service" "up should say it cleared the dead entry"
+assert_contains "$stale_out" "http://127.0.0.1:8893" "up should then start the new service"
+assert_grep "fresh" "$REG_STALE" "the new label should be registered"
+wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_STALE" --all >/dev/null 2>&1 || true
+pass "real tmux: a provably dead registered service is cleared instead of blocking a new up"
+
 # --- fm-teardown reaps the tab and keeps the log -----------------------------
 # Minimal scout task so teardown skips landed-work/worktree machinery: a
 # nonexistent worktree dir bypasses the treehouse return, and a present report
 # satisfies the scout carve-out. window=/backend= drive the reap.
-TASK_T=$("$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{session_name}:#{window_id}' | head -1)
+TASK_T=$("$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{session_name}:#{window_id}#{window_name}' \
+  | sed -n "s/^\(firstmate:@[0-9]*\)fm-$ID\$/\1/p" | head -1)
+[ -n "$TASK_T" ] || fail "could not resolve the task's own window"
 fm_write_meta "$HOME_DIR/state/$ID.meta" \
   "window=$TASK_T" \
   "worktree=$HOME_DIR/no-such-worktree" \
@@ -197,6 +460,57 @@ fi
 assert_absent "$REG" "teardown should remove the api-tabs registry file"
 assert_present "$LOGFILE" "teardown must KEEP the dated log (collected, not deleted)"
 pass "real tmux: fm-teardown reaps the registered service window and keeps the dated log"
+
+# --- teardown reaps the service even when the worktree return fails ----------
+# Regression: the reap used to run AFTER teardown_treehouse_return, so a failed
+# return aborted teardown with the service tab still live and serving - the exact
+# orphan this feature exists to prevent. A scout task skips the landed-work gate,
+# and a worktree dir that is not a treehouse checkout makes the return fail.
+FAILID=failret
+FAILREG="$HOME_DIR/state/$FAILID.api-tabs"
+FAILWT="$HOME_DIR/failret-worktree"
+mkdir -p "$FAILWT" "$HOME_DIR/data/$FAILID"
+: > "$HOME_DIR/data/$FAILID/report.md"
+fail_up=$(wapi_tmux FM_WORKER_API_REGISTRY="$FAILREG" FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --port 8896 -- python3 -m http.server 8896) \
+  || fail "up failed for the teardown-ordering case"$'\n'"$fail_up"
+FAIL_TASK_T=$("$REAL_TMUX" -L "$SOCKET" new-window -dP -F '#{session_name}:#{window_id}' -t firstmate: -n "fm-$FAILID")
+fm_write_meta "$HOME_DIR/state/$FAILID.meta" \
+  "window=$FAIL_TASK_T" \
+  "worktree=$FAILWT" \
+  "project=$HOME_DIR/no-such-project" \
+  "harness=echo" \
+  "kind=scout" \
+  "mode=no-mistakes" \
+  "yolo=off" \
+  "backend=tmux"
+env -u TMUX FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" TMUX="$SOCKET_PATH_TMUX" \
+  "$TEARDOWN" "$FAILID" >/dev/null 2>&1 || true
+sleep 1
+if "$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' 2>/dev/null | grep -qx "fm-$FAILID-api"; then
+  fail "the service window survived a teardown whose worktree return failed (orphan)"
+fi
+pass "real tmux: teardown reaps the service window even when the worktree return fails"
+
+# --- sweep closes a real orphaned service window -----------------------------
+# The recovery-side backstop: a task that never reaches teardown (crash, lost
+# meta, --force discard) leaves a live tab nothing else will ever close.
+SWEEPID=sweepme
+SWEEPREG="$HOME_DIR/state/$SWEEPID.api-tabs"
+sweep_up=$(wapi_tmux FM_WORKER_API_REGISTRY="$SWEEPREG" FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --port 8897 -- python3 -m http.server 8897) \
+  || fail "up failed for the sweep case"$'\n'"$sweep_up"
+"$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' | grep -qx "fm-$SWEEPID-api" \
+  || fail "precondition: the sweep task's service window should exist"
+# No state/<id>.meta was ever written, so the task is gone as far as firstmate knows.
+sweep_out=$(wapi_tmux "$WAPI" sweep --state "$HOME_DIR/state" 2>&1) || fail "sweep exited non-zero"
+assert_contains "$sweep_out" "$SWEEPID" "sweep should name the orphaned task"
+sleep 1
+if "$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' 2>/dev/null | grep -qx "fm-$SWEEPID-api"; then
+  fail "sweep did not close the orphaned service window"
+fi
+assert_absent "$SWEEPREG" "sweep should remove the orphaned registry"
+pass "real tmux: sweep closes an orphaned task's service window and clears its registry"
 
 tmux_cleanup
 trap - EXIT

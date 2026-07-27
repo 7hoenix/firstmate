@@ -191,3 +191,23 @@ fm_backend_tmux_sibling_up() {  # <session> <label> <cwd> <cmd> -> prints "<sess
 fm_backend_tmux_sibling_down() {  # <endpoint "session:window_id">
   fm_backend_tmux_kill "${1#*:}"
 }
+
+# fm_backend_tmux_sibling_alive: does the service window behind <endpoint> still
+# exist? Prints nothing; the exit status is the answer:
+#   0 - alive, the window id is listed in the session
+#   1 - CONFIDENTLY gone, the session answers but does not list that window
+#   2 - unknown, the server or session could not be read at all
+#
+# Deliberately NOT `display-message -t <endpoint>`, which is what
+# fm_backend_target_exists uses: verified on tmux 3.6a that display-message
+# SUCCEEDS for a killed or nonexistent window (`-t firstmate:@99` prints the
+# session's current pane and exits 0), so it can never report a window as gone.
+# list-windows enumerates real window ids, so an exact match is a true existence
+# test, and has-session separates "window gone" from "cannot read the server".
+fm_backend_tmux_sibling_alive() {  # <endpoint "session:window_id">
+  local endpoint=$1 ses=${1%%:*}
+  tmux list-windows -t "$ses" -F '#{session_name}:#{window_id}' 2>/dev/null \
+    | grep -Fqx "$endpoint" && return 0
+  tmux has-session -t "$ses" >/dev/null 2>&1 || return 2
+  return 1
+}

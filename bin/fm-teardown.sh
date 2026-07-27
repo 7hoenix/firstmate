@@ -992,6 +992,37 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# Close any worker-hosted service tabs this task opened (bin/fm-worker-api.sh), so
+# a visible on-demand-API tab and its server process are reaped and never
+# orphaned. The dated log the service wrote is deliberately KEPT (the captain
+# collects logs; bulk-pruned later via fm-worker-api.sh logs --prune-before); only
+# the tab and its process are reaped here.
+#
+# Placement is load-bearing, and this is the reason it runs here rather than
+# beside the pane kill further down. A service tab is a SEPARATE terminal
+# endpoint, independent of the worktree, so it can be reaped once the safety
+# gates above have passed. Reaping it later - after the worktree return - meant a
+# failed return aborted teardown with the service still running and its registry
+# about to be left behind: the exact orphan this feature exists to prevent.
+# Running before the herdr workspace reap is also still satisfied, since that
+# happens later: closing the API pane empties the per-task workspace so the reap
+# can then close it.
+#
+# One narrow window remains, deliberately: teardown_treehouse_return re-runs
+# validate_worktree_teardown_safety after stale-lock cleanup, so a teardown can
+# still refuse AFTER the service has been reaped. That is the lesser evil - the
+# alternative is the orphan above on every failed return - and by that point
+# teardown has already deleted the task branch and hook files anyway.
+reap_worker_api_tabs() {
+  local registry="$STATE/$ID.api-tabs" api_backend api_endpoint
+  [ -f "$registry" ] || return 0
+  while IFS=$'\t' read -r _api_label api_backend api_endpoint _api_port _api_log; do
+    [ -n "$api_endpoint" ] || continue
+    fm_backend_sibling_down "$api_backend" "$api_endpoint" </dev/null 2>/dev/null || true
+  done < "$registry"
+}
+[ "$BACKEND" = orca ] || reap_worker_api_tabs
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -1034,20 +1065,6 @@ fi
 
 if [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  # Close any worker-hosted service tabs this task opened (bin/fm-worker-api.sh),
-  # so a visible on-demand-API tab and its server process are reaped and never
-  # orphaned. Done BEFORE the workspace reap so that on herdr, closing the API
-  # pane empties the per-task workspace and the reap below can then close it. The
-  # dated log the service wrote is deliberately KEPT (the captain collects logs;
-  # bulk-pruned later via fm-worker-api.sh logs --prune-before); only the tab and
-  # its process are reaped here.
-  API_REGISTRY="$STATE/$ID.api-tabs"
-  if [ -f "$API_REGISTRY" ]; then
-    while IFS=$'\t' read -r _api_label api_backend api_endpoint _api_port _api_log; do
-      [ -n "$api_endpoint" ] || continue
-      fm_backend_sibling_down "$api_backend" "$api_endpoint" 2>/dev/null || true
-    done < "$API_REGISTRY"
-  fi
   # P4 (herdr workspace-per-task): after killing the task's pane, close its own
   # now-empty per-task workspace. No-op for every other backend, and for herdr
   # it never closes the legacy shared per-home workspace or one holding other

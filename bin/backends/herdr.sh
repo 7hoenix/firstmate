@@ -1493,3 +1493,18 @@ fm_backend_herdr_sibling_up() {  # <container "session:workspace_id"> <label> <c
 fm_backend_herdr_sibling_down() {  # <endpoint "session:pane_id">
   fm_backend_herdr_kill "$1"
 }
+
+# fm_backend_herdr_sibling_alive: does the service pane behind <endpoint> still
+# exist? Prints nothing; the exit status is the answer:
+#   0 - alive, the pane answers
+#   1 - CONFIDENTLY gone, the session answers but the pane does not
+#   2 - unknown, the endpoint is malformed or the session could not be read
+# The session-level probe is what separates "the pane is gone" from "the herdr
+# server is unreachable", so a dead server is never mistaken for a dead service.
+fm_backend_herdr_sibling_alive() {  # <endpoint "session:pane_id">
+  local session=${1%%:*} pane=${1#*:}
+  [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$1" ] || return 2
+  fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1 && return 0
+  fm_backend_herdr_cli "$session" workspace list >/dev/null 2>&1 || return 2
+  return 1
+}
