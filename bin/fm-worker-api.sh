@@ -37,8 +37,10 @@
 #                         --port pins an explicit value and REFUSES a port that is
 #                         already in use, so "the port started accepting" stays a
 #                         truthful readiness signal for the service we launched.
-#                         Selection through BIND is serialized by a machine-wide
-#                         lock so concurrent `up`s cannot race onto the same port.
+#                         Selection through BIND is serialized by a same-user,
+#                         cross-repo lock (it lives under $TMPDIR, which is
+#                         per-user on macOS) so concurrent `up`s cannot race onto
+#                         the same port.
 #   - Logs (collected, not deleted): the service's stdout+stderr is teed to a
 #                         dated file under $FM_WORKER_API_LOGDIR
 #                         (<id>-<label>-<YYYY-MM-DD-HHMMSS>.log) that SURVIVES
@@ -126,9 +128,16 @@ detect_backend_container() {
 
 # --- port selection ----------------------------------------------------------
 
+# Both loopback families are probed. A service bound ONLY to ::1 is invisible to a
+# 127.0.0.1 probe (verified: `python3 -m http.server --bind ::1` reads as free),
+# which would defeat the two guarantees built on this helper - the pinned-port
+# refusal, and readiness meaning "our service is listening". On a host without
+# IPv6 the ::1 connect simply fails and the v4 answer stands.
 port_is_free() {  # <port>  -> 0 when nothing is listening (connect refused)
   local p=$1
-  ! (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null
+  (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && return 1
+  (exec 3<>"/dev/tcp/::1/$p") 2>/dev/null && return 1
+  return 0
 }
 
 # Port selection through BIND is one critical section: without it two concurrent
@@ -274,7 +283,10 @@ service_is_dead() {  # <backend> <endpoint> <port> <logfile>
   [ -n "$port" ] || return 0
   port_is_free "$port" || return 1
   if [ -n "$endpoint" ]; then
-    fm_backend_sibling_alive "$b" "$endpoint" >/dev/null 2>&1 && alive=0 || alive=$?
+    # `</dev/null` because this runs inside a `while read < registry` loop and the
+    # herdr probe shells out to a CLI that inherits stdin; without it the probe can
+    # eat the registry stream and silently truncate the loop.
+    fm_backend_sibling_alive "$b" "$endpoint" </dev/null >/dev/null 2>&1 && alive=0 || alive=$?
     # Only a CONFIDENT "gone" counts. An unreadable server (2) must never be read
     # as a dead service, or a transient backend hiccup would reap live work.
     [ "$alive" = 1 ] && return 0
@@ -287,7 +299,7 @@ service_is_dead() {  # <backend> <endpoint> <port> <logfile>
 clear_dead_registry_entries() {
   [ -s "$REGISTRY" ] || return 0
   local label b endpoint port logfile cleared=0
-  while IFS=$'\t' read -r label b endpoint port logfile; do
+  while IFS=$'\t' read -r label b endpoint port logfile || [ -n "$label" ]; do
     [ -n "$label" ] || continue
     if service_is_dead "$b" "$endpoint" "$port" "$logfile"; then
       [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
@@ -391,7 +403,7 @@ cmd_up() {  # <restart 0|1>
     local existing
     existing=$(registry_labels)
     if printf '%s\n' "$existing" | grep -Fqx -- "$label"; then
-      [ "$restart" = 1 ] || restart=1  # same label -> replace
+      restart=1  # same label -> replace, whether or not `restart` was asked for
     elif [ -n "$existing" ]; then
       clear_dead_registry_entries || true
       existing=$(registry_labels)
@@ -401,13 +413,9 @@ cmd_up() {  # <restart 0|1>
     fi
   fi
 
-  # Reuse the recorded port on a same-label restart unless --port overrides.
-  if [ "$restart" = 1 ] && [ -z "$port" ]; then
-    local prior
-    prior=$(registry_line_for_label "$label" || true)
-    [ -z "$prior" ] || port=$(printf '%s' "$prior" | cut -f4)
-  fi
-  # Close a prior same-label service before relaunching.
+  # Close a prior same-label service before relaunching, reusing its port unless
+  # --port overrides. One lookup serves both: the recorded line carries the
+  # endpoint to close and the port to reuse.
   if [ "$restart" = 1 ]; then
     local prior endpoint b reused_port
     prior=$(registry_line_for_label "$label" || true)
@@ -415,6 +423,7 @@ cmd_up() {  # <restart 0|1>
       b=$(printf '%s' "$prior" | cut -f2)
       endpoint=$(printf '%s' "$prior" | cut -f3)
       reused_port=$(printf '%s' "$prior" | cut -f4)
+      [ -z "$port" ] && port=$reused_port
       [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
       registry_remove_label "$label"
       # The tab is killed asynchronously; when we reuse its port, wait briefly for
@@ -466,11 +475,22 @@ cmd_up() {  # <restart 0|1>
   fi
 
   mkdir -p "$LOGDIR" || die "cannot create log dir $LOGDIR"
-  local stamp logfile
-  # Seconds resolution: a restart within the same minute must not interleave two
-  # runs into one log file.
+  local stamp logfile n
+  # Seconds resolution, and never a shared file. Two runs of one label inside the
+  # same second would otherwise append to the same log (`tee -a`), and then every
+  # reader looking for THIS run's exit marker could match the previous run's -
+  # making a healthy, still-starting service read as provably dead and get its tab
+  # closed. Uniquifying the filename removes that whole class instead of teaching
+  # each reader to compensate. Note the "-<n>" suffix sorts BEFORE the bare name
+  # ('-' < '.'), which is why `logs` resolves the newest log by mtime rather than
+  # lexically.
   stamp=$(date +%Y-%m-%d-%H%M%S)
   logfile="$LOGDIR/$ID-$label-$stamp.log"
+  n=2
+  while [ -e "$logfile" ]; do
+    logfile="$LOGDIR/$ID-$label-$stamp-$n.log"
+    n=$((n + 1))
+  done
 
   # Tee the service output: the tab shows it live (visual stream) AND it appends
   # to a dated, searchable log (kept past teardown). PORT is exported so the
@@ -542,7 +562,7 @@ cmd_down() {
       return 0
     fi
     local label b endpoint
-    while IFS=$'\t' read -r label b endpoint _ _; do
+    while IFS=$'\t' read -r label b endpoint _ _ || [ -n "$label" ]; do
       [ -n "$label" ] || continue
       [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
       echo "service '$label' stopped (log kept)"
@@ -565,7 +585,7 @@ cmd_down() {
 
 print_registry_status() {  # <registry-file> <prefix>
   local reg=$1 prefix=$2 label backend endpoint port logfile state last
-  while IFS=$'\t' read -r label backend endpoint port logfile; do
+  while IFS=$'\t' read -r label backend endpoint port logfile || [ -n "$label" ]; do
     [ -n "$label" ] || continue
     if port_is_free "$port"; then state="down"; else state="serving"; fi
     last=""
@@ -619,7 +639,7 @@ cmd_sweep() {
     id=$(basename "$reg"); id=${id%.api-tabs}
     [ -f "$state/$id.meta" ] && continue
     n=0
-    while IFS=$'\t' read -r _ b endpoint _ _; do
+    while IFS=$'\t' read -r sweep_label b endpoint _ _ || [ -n "$sweep_label" ]; do
       [ -n "$endpoint" ] || continue
       if [ "$SWEEP_DRY_RUN" = 1 ]; then
         n=$((n + 1))
@@ -648,6 +668,19 @@ cmd_logs() {
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
       *) die "logs --prune-before wants a YYYY-MM-DD date, got '$LOGS_PRUNE_BEFORE'" ;;
     esac
+    # Shape is not enough, and neither is "some find accepted it". This deletes
+    # the captain's collected logs irreversibly, and find implementations disagree
+    # about impossible dates: BSD rejects 2020-13-45, while a GNU-style find
+    # normalizes month 13 into the next year and silently prunes a WIDER range
+    # than was asked for. Validate the components ourselves so the same typo is
+    # refused everywhere, then keep the find probe below as the portability check.
+    local _y _m _d
+    _y=${LOGS_PRUNE_BEFORE%%-*}
+    _m=${LOGS_PRUNE_BEFORE#*-}; _m=${_m%%-*}
+    _d=${LOGS_PRUNE_BEFORE##*-}
+    if [ "$_y" -lt 1970 ] || [ "$_m" -lt 1 ] || [ "$_m" -gt 12 ] || [ "$_d" -lt 1 ] || [ "$_d" -gt 31 ]; then
+      die "logs --prune-before got an impossible date '$LOGS_PRUNE_BEFORE' (want YYYY-MM-DD with month 01-12, day 01-31)"
+    fi
     [ -d "$LOGDIR" ] || { echo "no log dir $LOGDIR"; return 0; }
     # Shape alone does not mean this system's find can parse it: BSD find rejects
     # far-future dates that GNU find accepts. Probe first so a rejected date is an
@@ -666,11 +699,13 @@ cmd_logs() {
   if [ -n "$prior" ]; then
     logfile=$(printf '%s' "$prior" | cut -f5)
   else
-    # Fall back to the newest log for this label. Filenames embed a zero-padded
-    # YYYY-MM-DD-HHMMSS stamp, so the lexically-last glob match is the most recent.
+    # Fall back to the newest log for this label, by MODIFICATION TIME. Lexical
+    # order is wrong here: a same-second run gets a "-<n>" suffix that sorts
+    # before the bare name, so the lexically-last match is not the most recent.
     logfile=
     for match in "$LOGDIR/$ID-$LOGS_LABEL-"*.log; do
-      [ -e "$match" ] && logfile=$match
+      [ -e "$match" ] || continue
+      if [ -z "$logfile" ] || [ "$match" -nt "$logfile" ]; then logfile=$match; fi
     done
   fi
   [ -n "$logfile" ] && [ -f "$logfile" ] || die "no log found for label '$LOGS_LABEL'"

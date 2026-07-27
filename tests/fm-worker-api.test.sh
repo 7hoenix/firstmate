@@ -105,19 +105,26 @@ test_prune_before_rejects_bad_date() {
   pass "fm-worker-api.sh: logs --prune-before rejects a malformed date"
 }
 
-# A date of the right SHAPE that no find implementation can parse must be an
-# error. The shape check alone used to be the only gate, and the delete was
-# `|| true`, so an unparseable date printed "pruned 0 log file(s)" and exited 0 -
-# a false success that silently kept every log the captain asked to prune.
-test_prune_before_rejects_unparseable_date() {
-  local reg="$TMP_ROOT/state-unparseable/task-u.api-tabs" logdir="$TMP_ROOT/logs-unparseable" out rc=0
+# A date of the right SHAPE but an impossible value must be an error, on every
+# find implementation. Two bugs converge here: the delete used to be `|| true`, so
+# a date the local find rejected printed "pruned 0 log file(s)" and exited 0 - a
+# false success that silently kept every log the captain asked to prune. And find
+# flavors disagree: BSD rejects 2020-13-45 while a GNU-style find normalizes month
+# 13 into the next year and prunes a WIDER range than was asked for. Since this
+# deletes collected logs irreversibly, the components are validated directly.
+test_prune_before_rejects_impossible_dates() {
+  local reg="$TMP_ROOT/state-unparseable/task-u.api-tabs" logdir="$TMP_ROOT/logs-unparseable" log out rc d
   mkdir -p "$(dirname "$reg")" "$logdir"
-  : > "$logdir/task-u-api-2020-01-01-000000.log"
-  out=$(clean_env "$WAPI" logs --registry "$reg" --logdir "$logdir" --prune-before 9999-99-99 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "an unparseable prune date must fail, got a success:"$'\n'"$out"
-  assert_contains "$out" "cannot parse the date" "the error should name the unparseable date"
-  assert_present "$logdir/task-u-api-2020-01-01-000000.log" "a failed prune must not delete anything"
-  pass "fm-worker-api.sh: logs --prune-before errors on a shape-valid but unparseable date"
+  log="$logdir/task-u-api-2020-01-01-000000.log"
+  : > "$log"
+  for d in 9999-99-99 2020-13-45 2026-00-10 2026-08-32; do
+    rc=0
+    out=$(clean_env "$WAPI" logs --registry "$reg" --logdir "$logdir" --prune-before "$d" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "prune date '$d' is impossible and must fail, got a success:"$'\n'"$out"
+    assert_contains "$out" "impossible date" "the error for '$d' should say the date is impossible"
+    assert_present "$log" "a failed prune must not delete anything (date '$d')"
+  done
+  pass "fm-worker-api.sh: logs --prune-before errors on shape-valid but impossible dates"
 }
 
 # Portable invariant across find flavors: BSD/macOS find REJECTS a far-future
@@ -223,7 +230,7 @@ test_cmux_pane_is_not_mistaken_for_tmux
 test_down_when_nothing_registered
 test_logs_prune_before
 test_prune_before_rejects_bad_date
-test_prune_before_rejects_unparseable_date
+test_prune_before_rejects_impossible_dates
 test_prune_before_far_future_is_never_a_false_success
 test_sweep_leaves_a_live_task_alone
 test_sweep_clears_an_orphaned_registry
@@ -379,6 +386,32 @@ assert_contains "$kt2_out" "cleared stale service" "a service whose tab is gone 
 assert_contains "$kt2_out" "http://127.0.0.1:8899" "the new service should then start"
 wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_KILLED" --all >/dev/null 2>&1 || true
 pass "real tmux: a service whose tab was killed is cleared instead of blocking the worker's slot"
+
+# --- an IPv6-only listener is not mistaken for a free port -------------------
+# port_is_free probed only 127.0.0.1, so a service bound solely to ::1 read as
+# free. That defeats both guarantees built on the probe: the pinned-port refusal
+# never fires, and readiness can never observe an IPv6-only service.
+if python3 -c "
+import socket,sys
+s=socket.socket(socket.AF_INET6)
+try: s.bind(('::1',8878)); s.close()
+except Exception: sys.exit(1)
+" 2>/dev/null; then
+  python3 -m http.server 8878 --bind ::1 >/dev/null 2>&1 &
+  V6_PID=$!
+  sleep 2
+  REG_V6="$HOME_DIR/state/v6.api-tabs"
+  v6_rc=0
+  v6_out=$(wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+    "$WAPI" up --registry "$REG_V6" --port 8878 -- python3 -m http.server 8878 2>&1) || v6_rc=$?
+  kill "$V6_PID" 2>/dev/null || true
+  [ "$v6_rc" -ne 0 ] || fail "up must refuse a port held by an IPv6-only listener, got:"$'\n'"$v6_out"
+  assert_contains "$v6_out" "already in use" "the refusal should name the port conflict"
+  assert_absent "$REG_V6" "a refused up must not register anything"
+  pass "real tmux: a port held only on ::1 is seen as taken, not free"
+else
+  echo "skip: cannot bind ::1 - skipping the IPv6 port-probe check"
+fi
 
 # --- a stale exit marker cannot kill a healthy launch ------------------------
 # Two runs of the same label inside one second share a log filename, and `tee -a`

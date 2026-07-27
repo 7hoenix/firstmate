@@ -1482,7 +1482,14 @@ fm_backend_herdr_sibling_up() {  # <container "session:workspace_id"> <label> <c
     echo "error: herdr sibling tab create returned no tab/pane id" >&2
     return 1
   fi
-  fm_backend_herdr_send_text_line "$session:$pane_id" "$cmd" || return 1
+  # Close the tab we just created if the command never reaches it: the caller
+  # writes no registry line on a non-zero return, so the tab would be left with
+  # nothing tracking it. The per-task workspace reap would eventually cover it,
+  # but only at teardown, and only for a workspace this home owns.
+  if ! fm_backend_herdr_send_text_line "$session:$pane_id" "$cmd"; then
+    fm_backend_herdr_kill "$session:$pane_id" 2>/dev/null || true
+    return 1
+  fi
   printf '%s:%s\n' "$session" "$pane_id"
 }
 

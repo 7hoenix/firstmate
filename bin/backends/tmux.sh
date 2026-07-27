@@ -180,7 +180,15 @@ fm_backend_tmux_sibling_up() {  # <session> <label> <cwd> <cmd> -> prints "<sess
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$label" -c "$cwd") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
-  tmux send-keys -t "$wid" "$cmd" Enter || return 1
+  # Close the window we just created if the command never reaches it. The caller
+  # treats a non-zero return as "the tab was not opened" and writes no registry
+  # line, so leaving it behind would orphan a window nothing tracks or reaps -
+  # and unlike the task's own pane, a service window is a session-level sibling
+  # that no workspace reap covers.
+  if ! tmux send-keys -t "$wid" "$cmd" Enter; then
+    tmux kill-window -t "$ses:$wid" 2>/dev/null || true
+    return 1
+  fi
   printf '%s:%s\n' "$ses" "$wid"
 }
 
@@ -188,8 +196,17 @@ fm_backend_tmux_sibling_up() {  # <session> <label> <cwd> <cmd> -> prints "<sess
 # fm_backend_tmux_sibling_up, given its "<session>:<window_id>" endpoint.
 # kill-window kills every pane in the window, so the hosted server process dies
 # with it. Best-effort, mirroring fm_backend_tmux_kill.
+# Killing the endpoint is scoped to the recorded SESSION, and skipped entirely
+# unless that exact window is still there. A bare window id is only unique within
+# one tmux server lifetime - ids restart at @0 after a server restart, while
+# state/<id>.api-tabs survives on disk - so an unscoped kill of a stale id could
+# close an unrelated window, including a freshly spawned crewmate's own fm-<id>
+# window. Skipping on "confidently gone" is what makes a stale registry entry
+# harmless; skipping on "unknown" costs nothing, since an unreadable server has
+# nothing for us to kill anyway. Still best-effort and idempotent.
 fm_backend_tmux_sibling_down() {  # <endpoint "session:window_id">
-  fm_backend_tmux_kill "${1#*:}"
+  fm_backend_tmux_sibling_alive "$1" || return 0
+  fm_backend_tmux_kill "$1"
 }
 
 # fm_backend_tmux_sibling_alive: does the service window behind <endpoint> still

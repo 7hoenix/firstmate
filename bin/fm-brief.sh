@@ -242,6 +242,7 @@ If you need a long-lived service running while you work (e.g. \`wrangler dev\`, 
 Run it through the worker-API helper: \`$FM_ROOT/bin/fm-worker-api.sh up -- <your launch command>\`.
 It opens the service in a visible, named tab in your own workspace the captain can watch and hop into, picks a free port and prints it, tees output to a searchable dated log, and is reaped automatically at teardown.
 Manage it with \`$FM_ROOT/bin/fm-worker-api.sh status\`, \`... restart\`, and \`... down\`; v1 hosts one service per worker.
+v1 covers the tmux and herdr backends only - on any other backend \`up\` refuses with a clear message, so fall back to running the service in the foreground of your own pane and reporting that you cannot host it in a separate tab.
 EOF
 )
 

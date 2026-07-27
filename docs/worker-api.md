@@ -67,6 +67,16 @@ This is **not** herdr lifecycle work: it only creates a tab in the worker's alre
 Teardown reaps the service tabs as soon as its safety gates have passed, **before** it returns the worktree.
 The order is deliberate: a service tab is a separate terminal endpoint with no dependency on the worktree, and reaping it after the worktree return meant a failed return aborted teardown with the service still live - the very orphan this feature prevents.
 
+The reap runs for **every** backend, Orca included, and dispatches per the backend each registry line *records*.
+`fm-worker-api.sh` records the backend it detected from the pane environment, not the task's backend, and `fm-spawn.sh` exports the registry path into every crewmate pane - so an Orca task whose pane sits inside a tmux session can register a real service.
+Skipping the reap there while teardown still deletes the registry would orphan that service permanently, with nothing left for `sweep` to find.
+Dispatching per recorded backend is what makes this safe: `fm_backend_sibling_down` is a no-op for a backend it does not handle.
+
+Closing a tmux endpoint is scoped to the recorded session and skipped unless that exact window is still present.
+A bare window id is only unique within one tmux server lifetime - ids restart at `@0` after a restart while the registry survives on disk - so an unscoped kill of a stale id could close an unrelated window, including a freshly spawned crewmate's own.
+
+Every registry reader tolerates a final record with no trailing newline, so a truncated write cannot make the reaper silently skip an entry.
+
 `bin/fm-spawn.sh` exports `FM_WORKER_API_REGISTRY` and `FM_WORKER_API_LOGDIR` into the worker's pane (like `GOTMPDIR`); `--registry`/`--logdir` override them for manual use and tests.
 
 ### Orphan sweep - the recovery-side backstop
@@ -106,7 +116,8 @@ Launching onto an occupied port would otherwise report a healthy service while t
 A pinned `--port` that is taken is an error naming the conflict.
 A `restart` whose old listener has not released the socket within 5s (a draining service, a forked child still holding it) falls back to a freshly derived port instead of failing: the old entry is already unregistered by then, so refusing would leave the worker with nothing at all.
 
-Selection through **bind** runs under a machine-wide `mkdir` lock (`$TMPDIR/fm-worker-api-port.lock`, stale after a minute), so two concurrent `up`s - different workers, or different repos on the same machine - cannot both claim the same port.
+Selection through **bind** runs under a `mkdir` lock (`$TMPDIR/fm-worker-api-port.lock`, stale after a minute), so two concurrent `up`s - different workers, or different repos - cannot both claim the same port.
+Its reach is same-user and cross-repo rather than truly machine-wide, because `$TMPDIR` is per-user on macOS; `FM_WORKER_API_PORT_LOCK` overrides the path.
 Holding the lock only until *registration* is not enough, and that was measured: five concurrent `up`s produced two workers on port 8837, the loser dying with `Address already in use` while `up` reported `API up` and `status` showed `[serving]` - because the readiness probe was seeing the *other* worker's listener.
 The lock therefore stays held until the service has actually bound.
 
@@ -117,6 +128,9 @@ Failing to take the lock never blocks a launch; it only forfeits the race protec
 A socket probe cannot see a port that another worker has *claimed* but whose service has not bound yet - the case where a slow service outlasts the readiness wait and the lock is released anyway.
 So port selection also consults every `state/*.api-tabs` in the state dir as the durable claim record, and both the derived and the pinned path skip or refuse a port another task already records.
 Only a **live** task's claim counts: a registry whose task has no `state/<id>.meta` is waiting for `sweep`, and honoring its claim would let a dead task reserve a port until the next session start.
+
+Both loopback families are probed.
+A service bound only to `::1` is invisible to a `127.0.0.1` probe and would read as free, which defeats the refusal above and makes readiness unobservable for that service.
 
 **Residual risk**: an unrelated process (nothing to do with firstmate) can still grab the port between the free check and the service's own bind.
 Readiness is a bare TCP connect, not a health check, so a service that binds the port but is not yet answering requests still reads as up.
@@ -132,8 +146,9 @@ $FM_WORKER_API_LOGDIR/<id>-<label>-<YYYY-MM-DD-HHMMSS>.log   (default: data/api-
 - **Visual stream** = the tab; **searchable stream** = this log. One source, two views, cannot drift.
 - Firstmate greps it for readiness/errors instead of peeking the pane; the captain searches history after scrollback rolls off.
 - Logs accumulate and are pruned in bulk later with `logs --prune-before <YYYY-MM-DD>` (or a plain `rm`), never per-task.
-- The stamp carries seconds so an `up`/`restart` inside the same minute cannot interleave two runs into one file. Two runs inside the same *second* still can, so `up` records the log's byte offset before launching and only ever reads back its own output - otherwise a previous run's exit marker would be read as this run's failure, and the failure path closes the tab and unregisters, killing a healthy service.
-- Pruning validates the date against the local `find` before deleting. BSD/macOS `find` rejects far-future dates that GNU `find` accepts, and the old code swallowed that error and printed `pruned 0 log file(s)` with exit 0 - a false success. An unparseable date is now an error.
+- The stamp carries seconds, and a run that would collide with an existing file gets a `-<n>` suffix, so **two runs never share a log**. Sharing one was the root of a nasty failure: a previous run's exit marker read as this run's, and the failure path closes the tab and unregisters - killing a healthy service. `up` also records the log's byte offset and reads back only its own output, as a second line of defence.
+- That `-<n>` suffix sorts *before* the bare name (`-` < `.`), which is why `logs` resolves the newest log for a label by modification time rather than lexically.
+- Pruning validates the date's components directly - month `01`-`12`, day `01`-`31`, a sane year - before it goes anywhere near `find`. Shape alone was not enough and neither was "some `find` accepted it": the old code swallowed `find`'s error and printed `pruned 0 log file(s)` with exit 0 (a false success), and `find` flavors disagree about impossible dates - BSD rejects `2020-13-45` while a GNU-style `find` normalizes month 13 into the next year and silently prunes a **wider** range than asked for. Since this deletes collected logs irreversibly, the same typo is now refused everywhere. The `find` probe stays afterwards as the portability check.
 
 #### Line buffering (why the launch line is wrapped)
 
@@ -217,3 +232,6 @@ Because the launch command is a shell line, a mis-quoted argument is the most co
 - herdr end-to-end in an isolated lab session (`bin/fm-herdr-lab.sh`): `up` created the labeled service tab in the worker's own workspace, bound the port, recorded a session-scoped endpoint, the stdout banner reached the log through `pane run`, `status` reported serving, and `down` closed the tab, killed the server, and kept the log.
 - Port lock robustness: an unbreakable stale lock (a regular file, or a non-empty directory, older than the stale threshold) made the acquire loop retry with no sleep and no timeout - `up` hung at full CPU. It now falls through to the bounded wait, verified by a test that asserts the run reaches the backend check well inside the wait.
 - Stale exit marker: a log pre-seeded with a previous run's `[fm-worker-api] service exited rc=1` no longer fails a healthy launch. Confirmed as a genuine regression test by reverting the byte-offset read, which makes the test fail.
+- IPv6: with `python3 -m http.server 8879 --bind ::1` running, the old 127.0.0.1-only probe reported the port free; `up --port 8879` now refuses it as in use.
+- tmux target scoping: `kill-window -t "<session>:@<id>"` is accepted, so the service kill is session-scoped; a stale window id no longer risks closing an unrelated window.
+- Prune date validation: `9999-99-99`, `2020-13-45`, `2026-00-10`, and `2026-08-32` are all refused with an "impossible date" error and delete nothing, independent of the local `find`.

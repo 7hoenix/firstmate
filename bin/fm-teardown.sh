@@ -1013,15 +1013,27 @@ fi
 # still refuse AFTER the service has been reaped. That is the lesser evil - the
 # alternative is the orphan above on every failed return - and by that point
 # teardown has already deleted the task branch and hook files anyway.
+#
+# Runs for EVERY backend, including orca. fm-worker-api.sh records the backend it
+# DETECTED from the pane env, not the task's backend, and fm-spawn.sh exports the
+# registry path into every crewmate pane - so an orca task whose pane sits inside
+# a tmux session can register a real service. Skipping the reap there while the
+# state cleanup below still deletes the registry would orphan that service
+# permanently, with nothing left for `sweep` to find. Dispatching per RECORDED
+# backend is what makes this safe: fm_backend_sibling_down is a no-op for a
+# backend it does not handle, so a line this teardown cannot act on costs nothing.
 reap_worker_api_tabs() {
   local registry="$STATE/$ID.api-tabs" api_backend api_endpoint
   [ -f "$registry" ] || return 0
-  while IFS=$'\t' read -r _api_label api_backend api_endpoint _api_port _api_log; do
+  # `|| [ -n "$_api_label" ]` so a final record with no trailing newline (a
+  # truncated write, a hand-edited file) is still reaped instead of silently
+  # skipped - the one failure mode this reaper must never have.
+  while IFS=$'\t' read -r _api_label api_backend api_endpoint _api_port _api_log || [ -n "$_api_label" ]; do
     [ -n "$api_endpoint" ] || continue
     fm_backend_sibling_down "$api_backend" "$api_endpoint" </dev/null 2>/dev/null || true
   done < "$registry"
 }
-[ "$BACKEND" = orca ] || reap_worker_api_tabs
+reap_worker_api_tabs
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
