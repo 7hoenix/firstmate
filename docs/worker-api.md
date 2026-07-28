@@ -41,6 +41,25 @@ cmux cannot be mis-detected as tmux, despite both being terminal hosts: cmux mar
 A `$TMUX` that *is* present inside a cmux tab belongs to a real nested tmux, which genuinely is the innermost layer and correctly wins.
 `tests/fm-worker-api.test.sh` pins the refusal.
 
+### What the tab looks like
+
+The tab is the product, so its first screen is designed rather than incidental.
+`up` clears the pane and prints a short header before the service's own output:
+
+```
+fm-worker-api  python3 -m http.server 8952
+  port 8952  ->  http://127.0.0.1:8952
+  log   /path/to/data/api-logs/h-api-2026-07-28-104258.log
+Serving HTTP on :: port 8952 (http://[::]:8952/) ...
+```
+
+Without it, a human hopping in met the whole escaped launch line - `script -q /dev/null bash -c export\ PORT=...` plus the absolute log path - echoed **twice** by the shell and wrapped mid-token.
+In a narrow docked herdr pane that consumed over half the visible rows before any real output.
+
+The header is printed with CRLF line endings, not LF.
+By the time it reaches the terminal, `script` has put it in raw mode with `ONLCR` off, so bare LFs move down without returning to column 0 and the header staircases across the screen.
+The log normalizer turns those back into plain newlines, so the same header reads correctly in the log.
+
 ### The sibling tab
 
 The tab-creation semantics live in the backend adapters (one owner), dispatched through `bin/fm-backend.sh`:
@@ -144,6 +163,8 @@ $FM_WORKER_API_LOGDIR/<id>-<label>-<YYYY-MM-DD-HHMMSS>.log   (default: data/api-
 ```
 
 - **Visual stream** = the tab; **searchable stream** = this log. One source, two views, cannot drift.
+- The two views are split at the `tee`, and only the log is normalized. Carriage returns become newlines there, because a display that redraws in place (`npm`, `curl`, `docker`) writes bare CRs with no newline and collapsed the raw log into a single unreadable line - `wc -l` reported **1** for a 23-update run, which defeats the log's whole job. The tab keeps the raw stream, so in-place redraw and colour look exactly as they did. Measured under an abrupt kill: splitting captured 32 lines against 30 for normalizing inline, so it costs no durability. This also strips the pty's trailing CR that was leaking into `status`'s `last:` line.
+- Raw ANSI colour escapes are still written to the log. They replay correctly in a terminal but read as noise in an editor or a grep hit; left as-is deliberately, since stripping them would lose the colour a terminal can use.
 - Firstmate greps it for readiness/errors instead of peeking the pane; the captain searches history after scrollback rolls off.
 - Logs accumulate and are pruned in bulk later with `logs --prune-before <YYYY-MM-DD>` (or a plain `rm`), never per-task.
 - The stamp carries seconds, and a run that would collide with an existing file gets a `-<n>` suffix, so **two runs never share a log**. Sharing one was the root of a nasty failure: a previous run's exit marker read as this run's, and the failure path closes the tab and unregisters - killing a healthy service. `up` also records the log's byte offset and reads back only its own output, as a second line of defence.
@@ -235,3 +256,10 @@ Because the launch command is a shell line, a mis-quoted argument is the most co
 - IPv6: with `python3 -m http.server 8879 --bind ::1` running, the old 127.0.0.1-only probe reported the port free; `up --port 8879` now refuses it as in use.
 - tmux target scoping: `kill-window -t "<session>:@<id>"` is accepted, so the service kill is session-scoped; a stale window id no longer risks closing an unrelated window.
 - Prune date validation: `9999-99-99`, `2020-13-45`, `2026-00-10`, and `2026-08-32` are all refused with an "impossible date" error and delete nothing, independent of the local `find`.
+
+2026-07-28, presentation pass on both backends (tmux 3.6a and a herdr lab session), captured as terminal content - never a desktop screenshot, per the incident recorded in `docs/cmux-backend.md`:
+
+- Confirmed good, unchanged by this pass: ANSI colour renders in the tab; unicode and emoji show no mojibake or column misalignment; long lines hard-wrap sanely at 100 and 60 columns; a 20,000-line burst arrived complete with nothing garbled or dropped; tab labels (`fm-<id>-<label>`) read clearly and never collide with the worker's own window.
+- Progress redraw, before: the tab looked perfect while the log held one ~858-byte line with every frame concatenated. After: the tab still redraws in place showing only the final frame, and the log holds one readable line per frame.
+- First screen, before: the escaped launch line filled the top of every tab, doubled and wrapped. After: a three-line header naming the command, port, URL and log path, then the service's own output.
+- Known and accepted: raw ANSI escapes remain in the log; a service that never binds a port always reports "not yet accepting connections" because readiness is port-bind-only.

@@ -348,8 +348,27 @@ clear_dead_registry_entries() {
 # util-linux needs `-e` to return the child's exit status; without it the marker
 # would report rc=0 for every failed command. It is probed with `-e` first so an
 # older build without that flag still resolves.
+# The log gets carriage returns normalized into newlines; the TAB does not. A
+# progress display that redraws in place (npm, curl, docker) writes bare CRs with
+# no newline, so the raw log collapses into one unreadable mega-line - `wc -l`
+# reports 1 for a 23-update run - which defeats the log's whole job as the
+# searchable stream. Normalizing only the log keeps the live tab's in-place
+# redraw exactly as good as it is now. Splitting via `tee >(...)` rather than
+# normalizing inline was measured under an abrupt kill: 32 lines captured vs 30
+# inline, so it costs no durability. It also strips the pty's trailing CR, which
+# was leaking into `status`'s "last:" line.
+log_normalizer() {
+  if command -v perl >/dev/null 2>&1; then
+    printf '%s' "perl -pe 'BEGIN{\$|=1} s/\r\n/\n/g; s/\r/\n/g'"
+  else
+    # tr streams byte-wise, so it never buffers; the cost is a blank line per
+    # CRLF, which is still readable and still line-oriented.
+    printf '%s' "tr '\r' '\n'"
+  fi
+}
+
 build_launch_line() {  # <port> <logfile> -> prints the shell line
-  local port=$1 logfile=$2 inner qinner wrapped=
+  local port=$1 logfile=$2 inner qinner header wrapped=''
   inner="export PORT=$port; $(printf '%s ' "${UP_CMD[@]}")"
   qinner=$(printf '%q' "$inner")
   if command -v script >/dev/null 2>&1; then
@@ -368,8 +387,19 @@ build_launch_line() {  # <port> <logfile> -> prints the shell line
       wrapped="bash -c $qinner"
     fi
   fi
-  printf '{ %s; echo "%s$?"; } 2>&1 | tee -a %s\n' \
-    "$wrapped" "$EXIT_MARKER" "$(printf '%q' "$logfile")"
+  # A human hopping into this tab used to be greeted by the whole escaped launch
+  # line, echoed twice by the shell and wrapped mid-token - over half the visible
+  # rows in a narrow pane, before any service output. `clear` plus a short header
+  # makes the first screen say what this tab IS. The header goes through the tee,
+  # so the log identifies its own run too.
+  # CRLF, not LF. By the time the header reaches the terminal, `script` has put it
+  # in raw mode with ONLCR off, so a bare LF moves down WITHOUT returning to
+  # column 0 and the header staircases across the screen. The log normalizer
+  # turns these back into plain newlines, so the log stays clean.
+  header="fm-worker-api  ${UP_CMD[*]}"$'\r\n'"  port $port  ->  http://127.0.0.1:$port"$'\r\n'"  log   $logfile"$'\r\n'
+  printf 'clear 2>/dev/null; { printf %%s %s; %s; echo "%s$?"; } 2>&1 | tee >(%s >> %s)\n' \
+    "$(printf '%q' "$header")" "$wrapped" "$EXIT_MARKER" \
+    "$(log_normalizer)" "$(printf '%q' "$logfile")"
 }
 
 # Only the bytes THIS run appended, so a previous run's output in a shared log
