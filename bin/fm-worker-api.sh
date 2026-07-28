@@ -28,10 +28,15 @@
 #   - Service tab label:  fm-<id>-<suffix>  (default suffix "api").
 #   - Reap registry:      one TAB-separated line per live service in
 #                         $FM_WORKER_API_REGISTRY:
-#                             <label>\t<backend>\t<endpoint>\t<port>\t<logfile>
+#                             <label>\t<backend>\t<endpoint>\t<port>\t<logfile>\t<pid>
 #                         Written on `up`, line removed on `down`. fm-teardown.sh
-#                         reads it, closes each endpoint, and deletes the registry
-#                         file - but KEEPS the log (see below).
+#                         reads it, closes each endpoint, KILLS the recorded
+#                         process group, and deletes the registry file - but KEEPS
+#                         the log (see below). The pid is load-bearing: closing the
+#                         tab does NOT stop a service running under the pty, so
+#                         without it the reap leaves the process alive. A 5-field
+#                         line from before this field is still read, and only loses
+#                         the process kill.
 #   - Port:               deterministic candidate from the worktree path, then the
 #                         first free port at/above it, printed so it is targetable.
 #                         --port pins an explicit value and REFUSES a port that is
@@ -278,6 +283,46 @@ registry_labels() {
   cut -f1 "$REGISTRY" 2>/dev/null
 }
 
+# Closing the tab is NOT enough to stop the service, which is the whole reason
+# this exists. Verified on Debian with util-linux script 2.38.1: with the pty
+# wrapper, killing the tmux window leaves BOTH `script` and the service alive and
+# still listening, because script puts the service in its own session that the
+# pane's SIGHUP never reaches. Without the wrapper the same service dies
+# correctly, so the pty is precisely what breaks it - and the pty is not
+# negotiable, because it is what stops the startup banner being lost.
+#
+# So the service is reaped explicitly, by process GROUP: the recorded pid is a
+# group leader, and for a pipeline the actual listener is a CHILD of it, so
+# killing the pid alone would leave the listener running.
+#
+# Guarded against pid reuse: the registry outlives the process, so a bare
+# `kill` could hit an unrelated pid that inherited the number. The kill only
+# proceeds while the recorded port is still held, which is both the symptom being
+# fixed and evidence the service is the thing still running.
+kill_service_group() {  # <pid> <port>
+  local pid=$1 port=$2
+  [ -n "$pid" ] || return 0
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 0
+  port_is_free "$port" && return 0
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  local waited=0
+  while [ "$waited" -lt 5 ]; do
+    port_is_free "$port" && return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  return 0
+}
+
+# Close a registered service completely: its tab AND its process group.
+stop_service() {  # <backend> <endpoint> <port> <pid>
+  local b=$1 endpoint=$2 port=$3 pid=$4
+  [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
+  kill_service_group "$pid" "$port"
+}
+
 # A registered service is provably dead when nothing is listening on its port AND
 # either its tab is gone or its log records the command's exit. "Port free" alone
 # is not enough: a service that is still starting up also has a free port, and
@@ -285,16 +330,20 @@ registry_labels() {
 service_is_dead() {  # <backend> <endpoint> <port> <logfile>
   local b=$1 endpoint=$2 port=$3 logfile=$4 alive=2
   [ -n "$port" ] || return 0
-  port_is_free "$port" || return 1
+  # A confidently-gone TAB makes the entry reapable even while the port is still
+  # held. On Linux that is the normal shape, not an edge case: killing the tab
+  # does not stop a service running under the pty, so it keeps serving with no
+  # tab to watch it through. Treating that as "still alive" would block the
+  # worker's one slot forever; treating it as reapable lets the caller stop the
+  # process properly instead of abandoning it.
   if [ -n "$endpoint" ]; then
-    # `</dev/null` because this runs inside a `while read < registry` loop and the
-    # herdr probe shells out to a CLI that inherits stdin; without it the probe can
-    # eat the registry stream and silently truncate the loop.
     fm_backend_sibling_alive "$b" "$endpoint" </dev/null >/dev/null 2>&1 && alive=0 || alive=$?
-    # Only a CONFIDENT "gone" counts. An unreadable server (2) must never be read
-    # as a dead service, or a transient backend hiccup would reap live work.
     [ "$alive" = 1 ] && return 0
   fi
+  # Otherwise the tab is still there (or unreadable, which never counts as gone -
+  # a backend hiccup must not reap live work), so the entry is only reapable when
+  # nothing is listening AND the run recorded its own exit.
+  port_is_free "$port" || return 1
   [ -n "$logfile" ] && [ -f "$logfile" ] && grep -Fq "$EXIT_MARKER" "$logfile" 2>/dev/null
 }
 
@@ -303,12 +352,12 @@ service_is_dead() {  # <backend> <endpoint> <port> <logfile>
 clear_dead_registry_entries() {
   [ -s "$REGISTRY" ] || return 0
   local label b endpoint port logfile cleared=0
-  while IFS=$'\t' read -r label b endpoint port logfile || [ -n "$label" ]; do
+  while IFS=$'\t' read -r label b endpoint port logfile pid || [ -n "$label" ]; do
     [ -n "$label" ] || continue
     if service_is_dead "$b" "$endpoint" "$port" "$logfile"; then
-      [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
+      stop_service "$b" "$endpoint" "$port" "$pid"
       registry_remove_label "$label"
-      echo "cleared stale service '$label' (no longer serving on :$port; log kept)"
+      echo "cleared stale service '$label' (tab gone or exited; stopped it and freed :$port, log kept)"
       cleared=1
     fi
   done < "$REGISTRY"
@@ -371,9 +420,14 @@ log_normalizer() {
   fi
 }
 
-build_launch_line() {  # <port> <logfile> -> prints the shell line
-  local port=$1 logfile=$2 inner qinner header wrapped=''
-  inner="export PORT=$port; $(printf '%s ' "${UP_CMD[@]}")"
+build_launch_line() {  # <port> <logfile> <pidfile> -> prints the shell line
+  local port=$1 logfile=$2 pidfile=$3 inner qinner header wrapped=''
+  # The inner shell records its OWN pid before running the command. Under the pty
+  # it is a session leader (script calls setsid), so that pid is a process-GROUP
+  # leader and killing the group reaps the service and anything it spawned - which
+  # is what makes the reap work for a pipeline too, where the listener is a child
+  # rather than the recorded process. See kill_service_group.
+  inner="echo \$\$ > $(printf '%q' "$pidfile"); export PORT=$port; $(printf '%s ' "${UP_CMD[@]}")"
   qinner=$(printf '%q' "$inner")
   if command -v script >/dev/null 2>&1; then
     if script -q -e -c true /dev/null </dev/null >/dev/null 2>&1; then
@@ -458,7 +512,7 @@ cmd_up() {  # <restart 0|1>
       endpoint=$(printf '%s' "$prior" | cut -f3)
       reused_port=$(printf '%s' "$prior" | cut -f4)
       [ -z "$port" ] && port=$reused_port
-      [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
+      stop_service "$b" "$endpoint" "$reused_port" "$(printf '%s' "$prior" | cut -f6)"
       registry_remove_label "$label"
       # The tab is killed asynchronously; when we reuse its port, wait briefly for
       # the old listener to release the socket so the relaunch binds deterministically.
@@ -541,9 +595,14 @@ cmd_up() {  # <restart 0|1>
   # service binds the chosen port. The launch command is run as a shell line (so
   # $PORT, pipes, and && work), so multi-word arguments must be quoted as they
   # would be for a shell.
-  local cwd launch endpoint log_offset
+  local cwd launch endpoint log_offset pidfile service_pid=''
   cwd=$(pwd -P)
-  launch=$(build_launch_line "$port" "$logfile")
+  # The launch line writes the service's process-group leader pid here; `up` reads
+  # it back and records it, so every later reap can stop the process and not just
+  # close the tab. Removed once read - it is a handoff, not state.
+  pidfile="$STATE_DIR/.$ID-$label.pid"
+  rm -f "$pidfile"
+  launch=$(build_launch_line "$port" "$logfile" "$pidfile")
   # Where THIS run's output starts. The stamp has seconds, but two runs of the
   # same label inside one second still share a filename, and `tee -a` appends. The
   # readiness loop must not see the PREVIOUS run's exit marker: it would conclude
@@ -555,10 +614,26 @@ cmd_up() {  # <restart 0|1>
   endpoint=$(fm_backend_sibling_up "$BACKEND" "$CONTAINER" "$full_label" "$cwd" "$launch") \
     || die "failed to open the service tab on backend $BACKEND"
 
+  # Give the launch line a moment to report its pid. Best-effort: an empty pid
+  # only costs the explicit process kill, leaving the pre-existing tab-close
+  # behavior, so a slow or failed handoff never blocks the launch.
+  local pid_wait=0
+  while [ "$pid_wait" -lt 5 ]; do
+    [ -s "$pidfile" ] && break
+    sleep 1
+    pid_wait=$((pid_wait + 1))
+  done
+  if [ -s "$pidfile" ]; then
+    service_pid=$(tr -dc '0-9' < "$pidfile" 2>/dev/null || true)
+  else
+    err "could not read the service pid; teardown will close the tab but may not stop the process"
+  fi
+  rm -f "$pidfile"
+
   # The tab is live; if we cannot register it, teardown cannot reap it - so on a
   # failed append, close the tab we just opened and fail loudly rather than leave
   # an orphaned service.
-  if ! printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$BACKEND" "$endpoint" "$port" "$logfile" >> "$REGISTRY"; then
+  if ! printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$BACKEND" "$endpoint" "$port" "$logfile" "$service_pid" >> "$REGISTRY"; then
     fm_backend_sibling_down "$BACKEND" "$endpoint" 2>/dev/null || true
     die "opened the service tab but failed to record it in $REGISTRY; closed the tab to avoid an orphan"
   fi
@@ -606,9 +681,9 @@ cmd_down() {
       return 0
     fi
     local label b endpoint
-    while IFS=$'\t' read -r label b endpoint _ _ || [ -n "$label" ]; do
+    while IFS=$'\t' read -r label b endpoint port _ pid || [ -n "$label" ]; do
       [ -n "$label" ] || continue
-      [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
+      stop_service "$b" "$endpoint" "$port" "$pid"
       echo "service '$label' stopped (log kept)"
     done < "$REGISTRY"
     : > "$REGISTRY"
@@ -622,14 +697,14 @@ cmd_down() {
   fi
   b=$(printf '%s' "$prior" | cut -f2)
   endpoint=$(printf '%s' "$prior" | cut -f3)
-  [ -z "$endpoint" ] || fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
+  stop_service "$b" "$endpoint" "$(printf '%s' "$prior" | cut -f4)" "$(printf '%s' "$prior" | cut -f6)"
   registry_remove_label "$DOWN_LABEL"
   echo "service '$DOWN_LABEL' stopped (log kept)"
 }
 
 print_registry_status() {  # <registry-file> <prefix>
   local reg=$1 prefix=$2 label backend endpoint port logfile state last
-  while IFS=$'\t' read -r label backend endpoint port logfile || [ -n "$label" ]; do
+  while IFS=$'\t' read -r label backend endpoint port logfile _pid || [ -n "$label" ]; do
     [ -n "$label" ] || continue
     if port_is_free "$port"; then state="down"; else state="serving"; fi
     last=""
@@ -683,13 +758,13 @@ cmd_sweep() {
     id=$(basename "$reg"); id=${id%.api-tabs}
     [ -f "$state/$id.meta" ] && continue
     n=0
-    while IFS=$'\t' read -r sweep_label b endpoint _ _ || [ -n "$sweep_label" ]; do
+    while IFS=$'\t' read -r sweep_label b endpoint sweep_port _ sweep_pid || [ -n "$sweep_label" ]; do
       [ -n "$endpoint" ] || continue
       if [ "$SWEEP_DRY_RUN" = 1 ]; then
         n=$((n + 1))
         continue
       fi
-      fm_backend_sibling_down "$b" "$endpoint" </dev/null 2>/dev/null || true
+      stop_service "$b" "$endpoint" "$sweep_port" "$sweep_pid"
       n=$((n + 1))
     done < "$reg"
     # Say nothing when there was nothing to close (an emptied registry left by a

@@ -1022,15 +1022,34 @@ fi
 # permanently, with nothing left for `sweep` to find. Dispatching per RECORDED
 # backend is what makes this safe: fm_backend_sibling_down is a no-op for a
 # backend it does not handle, so a line this teardown cannot act on costs nothing.
+# Closing the tab is not enough to stop the service. Verified on Debian with
+# util-linux script 2.38.1: the pty the service runs under puts it in its own
+# session, so the pane's SIGHUP never reaches it and both the pty and the service
+# keep running, still holding the port. The recorded pid is that session's
+# process-GROUP leader, so the group kill below is what actually reaps it - and
+# for a pipeline the listener is a CHILD of the recorded process, which is why the
+# kill targets the group rather than the pid.
 reap_worker_api_tabs() {
-  local registry="$STATE/$ID.api-tabs" api_backend api_endpoint
+  local registry="$STATE/$ID.api-tabs" api_backend api_endpoint api_pid waited
   [ -f "$registry" ] || return 0
   # `|| [ -n "$_api_label" ]` so a final record with no trailing newline (a
   # truncated write, a hand-edited file) is still reaped instead of silently
   # skipped - the one failure mode this reaper must never have.
-  while IFS=$'\t' read -r _api_label api_backend api_endpoint _api_port _api_log || [ -n "$_api_label" ]; do
+  while IFS=$'\t' read -r _api_label api_backend api_endpoint _api_port _api_log api_pid || [ -n "$_api_label" ]; do
     [ -n "$api_endpoint" ] || continue
     fm_backend_sibling_down "$api_backend" "$api_endpoint" </dev/null 2>/dev/null || true
+    # Pre-pid registries carry no sixth field; the tab close above is all that
+    # was ever available for those, so skip rather than guess at a pid.
+    case "${api_pid:-}" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$api_pid" 2>/dev/null || continue
+    kill -TERM -- "-$api_pid" 2>/dev/null || kill -TERM "$api_pid" 2>/dev/null || true
+    waited=0
+    while [ "$waited" -lt 5 ] && kill -0 "$api_pid" 2>/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    kill -0 "$api_pid" 2>/dev/null || continue
+    kill -KILL -- "-$api_pid" 2>/dev/null || kill -KILL "$api_pid" 2>/dev/null || true
   done < "$registry"
 }
 reap_worker_api_tabs

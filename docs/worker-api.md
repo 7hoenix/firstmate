@@ -76,7 +76,7 @@ This is **not** herdr lifecycle work: it only creates a tab in the worker's alre
 `up` appends one TAB-separated line per live service to `state/<id>.api-tabs`:
 
 ```
-<label>\t<backend>\t<endpoint>\t<port>\t<logfile>
+<label>\t<backend>\t<endpoint>\t<port>\t<logfile>\t<pid>
 ```
 
 - The endpoint is `<session>:<window_id>` (tmux) or `<session>:<pane_id>` (herdr).

@@ -387,6 +387,30 @@ assert_contains "$kt2_out" "http://127.0.0.1:8899" "the new service should then 
 wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_KILLED" --all >/dev/null 2>&1 || true
 pass "real tmux: a service whose tab was killed is cleared instead of blocking the worker's slot"
 
+# --- down actually STOPS the service, not just its tab -----------------------
+# The feature's core guarantee. Closing the tab is not sufficient: verified on
+# Debian with util-linux script 2.38.1 that the pty puts the service in its own
+# session, so the pane's SIGHUP never reaches it and both the pty and the service
+# keep running and holding the port. The registry therefore records the service's
+# process-group leader, and reaping kills that group.
+REG_KILL="$HOME_DIR/state/killproc.api-tabs"
+wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --registry "$REG_KILL" --port 8889 -- python3 -m http.server 8889 >/dev/null 2>&1 \
+  || fail "up failed for the process-kill case"
+KILL_PID=$(cut -f6 "$REG_KILL")
+[ -n "$KILL_PID" ] || fail "up must record the service pid as the registry's sixth field"
+case "$KILL_PID" in ''|*[!0-9]*) fail "recorded pid is not numeric: '$KILL_PID'" ;; esac
+kill -0 "$KILL_PID" 2>/dev/null || fail "the recorded pid $KILL_PID is not a live process"
+wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_KILL" >/dev/null 2>&1 \
+  || fail "down failed for the process-kill case"
+proc_gone=0
+for _ in 1 2 3 4 5 6 7 8; do
+  kill -0 "$KILL_PID" 2>/dev/null || { proc_gone=1; break; }
+  sleep 1
+done
+[ "$proc_gone" = 1 ] || fail "down closed the tab but left the service process $KILL_PID alive (the orphan bug)"
+pass "real tmux: down stops the service PROCESS, not just its tab"
+
 # --- an IPv6-only listener is not mistaken for a free port -------------------
 # port_is_free probed only 127.0.0.1, so a service bound solely to ::1 read as
 # free. That defeats both guarantees built on the probe: the pinned-port refusal
