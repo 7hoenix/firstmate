@@ -65,6 +65,10 @@ set -u
 PORT_BASE=${FM_WORKER_API_PORT_BASE:-8800}
 PORT_RANGE=${FM_WORKER_API_PORT_RANGE:-200}
 READY_TIMEOUT=${FM_WORKER_API_READY_TIMEOUT:-20}
+# How long a restart waits for its OWN previous listener to release the socket.
+# 5s was enough on a developer machine and not on CI, so it is both longer and
+# overridable; exceeding it is a warning, never a failure.
+RECLAIM_TIMEOUT=${FM_WORKER_API_RECLAIM_TIMEOUT:-15}
 PORT_LOCK=${FM_WORKER_API_PORT_LOCK:-${TMPDIR:-/tmp}/fm-worker-api-port.lock}
 PORT_LOCK_WAIT=${FM_WORKER_API_PORT_LOCK_WAIT:-30}
 
@@ -416,7 +420,7 @@ run_log_has_exit_marker() {  # <logfile> <byte-offset>
 # --- commands ----------------------------------------------------------------
 
 cmd_up() {  # <restart 0|1>
-  local restart=${1:-0} label port pinned=0
+  local restart=${1:-0} label port pinned=0 reclaiming=0
   label=$UP_LABEL
   port=$UP_PORT
   [ -z "$port" ] || pinned=1
@@ -459,21 +463,17 @@ cmd_up() {  # <restart 0|1>
       # The tab is killed asynchronously; when we reuse its port, wait briefly for
       # the old listener to release the socket so the relaunch binds deterministically.
       if [ -n "$reused_port" ] && [ "$reused_port" = "$port" ]; then
-        local freed=0
-        for _ in 1 2 3 4 5; do
+        # We are RECLAIMING our own port from the service we just killed, which
+        # is a different situation from picking a port nobody owns: we know the
+        # current listener is ours and is on its way out.
+        reclaiming=1
+        local freed=0 waited=0
+        while [ "$waited" -lt "$RECLAIM_TIMEOUT" ]; do
           if port_is_free "$port"; then freed=1; break; fi
           sleep 1
+          waited=$((waited + 1))
         done
-        # A service with a slow shutdown (draining connections, a forked child
-        # still holding the socket) must not turn a restart into a hard failure:
-        # the old entry is already unregistered by this point, so refusing would
-        # leave the worker with nothing. Fall back to a freshly derived port,
-        # which is printed like any other. An explicitly pinned --port is the
-        # caller's decision and still refuses below.
-        if [ "$freed" != 1 ] && [ "$pinned" != 1 ]; then
-          err "port $port still busy after 5s; picking a fresh port for this restart"
-          port=
-        fi
+        [ "$freed" = 1 ] || err "port $port not released after ${RECLAIM_TIMEOUT}s; launching anyway"
       fi
     fi
   fi
@@ -493,14 +493,28 @@ cmd_up() {  # <restart 0|1>
   # onto an already-occupied port would report a healthy service while the real
   # one died with "address already in use". Refuse instead of lying.
   if ! port_is_free "$port"; then
-    if [ "$pinned" = 1 ]; then
+    if [ "$reclaiming" = 1 ]; then
+      # Proceed rather than refuse or switch ports. Switching is actively WRONG
+      # here: the launch command commonly names the port itself (`http.server
+      # 8894`), so moving our chosen port under it guarantees the bind fails,
+      # which is exactly how CI caught this - the old listener took longer than
+      # the wait to release, the restart moved to a fresh port, and the service
+      # died on the port the command still named. Refusing is no better, since
+      # the prior entry is already unregistered and the worker would be left with
+      # nothing. The old listener is ours and dying, so the bind almost always
+      # succeeds a moment later - and if it genuinely does not, the exit marker
+      # reports the real reason instead of a guess.
+      err "port $port is still held by the service being replaced; launching anyway"
+    elif [ "$pinned" = 1 ]; then
       die "port $port is already in use; pick a free --port or omit --port to auto-derive one"
+    else
+      die "port $port was taken between selection and launch; retry, or pass a free --port"
     fi
-    die "port $port was taken between selection and launch; retry, or pass a free --port"
   fi
   # Another worker may hold a claim on this port whose service has not bound yet,
-  # which no socket probe can see.
-  if port_is_claimed "$port"; then
+  # which no socket probe can see. Not consulted when reclaiming our own port: it
+  # was ours a moment ago, and refusing here would leave the worker with nothing.
+  if [ "$reclaiming" != 1 ] && port_is_claimed "$port"; then
     die "port $port is already claimed by another task in $STATE_DIR; pick a free --port or omit --port to auto-derive one"
   fi
 

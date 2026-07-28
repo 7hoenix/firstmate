@@ -133,7 +133,14 @@ The launch command runs as a shell line, so `$PORT`, pipes, and `&&` work, and m
 Readiness is "something is now listening on the port", which only means *our* service is up if the port was ours to bind.
 Launching onto an occupied port would otherwise report a healthy service while the real one died with `address already in use`.
 A pinned `--port` that is taken is an error naming the conflict.
-A `restart` whose old listener has not released the socket within 5s (a draining service, a forked child still holding it) falls back to a freshly derived port instead of failing: the old entry is already unregistered by then, so refusing would leave the worker with nothing at all.
+**Reclaiming your own port on a `restart` is the one case that neither refuses nor moves.**
+`restart` waits up to `FM_WORKER_API_RECLAIM_TIMEOUT` (default 15s) for the service it just killed to release the socket, then launches on that same port regardless, with a warning.
+
+Both alternatives are worse, and CI proved it.
+Moving to a fresh port looks reasonable until you remember the launch command commonly names the port itself (`python3 -m http.server 8894`): changing the port underneath it guarantees the bind fails.
+That is exactly how this surfaced - on a slower CI machine the old listener outlived a 5s wait, the restart switched ports, and the service died with `Address already in use` on the port the command still named.
+Refusing is no better, since the prior entry is already unregistered and the worker would be left with no service at all.
+The old listener is ours and already dying, so the bind almost always succeeds a moment later; if it genuinely does not, the exit marker reports the real reason rather than a guess.
 
 Selection through **bind** runs under a `mkdir` lock (`$TMPDIR/fm-worker-api-port.lock`, stale after a minute), so two concurrent `up`s - different workers, or different repos - cannot both claim the same port.
 Its reach is same-user and cross-repo rather than truly machine-wide, because `$TMPDIR` is per-user on macOS; `FM_WORKER_API_PORT_LOCK` overrides the path.
@@ -263,3 +270,4 @@ Because the launch command is a shell line, a mis-quoted argument is the most co
 - Progress redraw, before: the tab looked perfect while the log held one ~858-byte line with every frame concatenated. After: the tab still redraws in place showing only the final frame, and the log holds one readable line per frame.
 - First screen, before: the escaped launch line filled the top of every tab, doubled and wrapped. After: a three-line header naming the command, port, URL and log path, then the service's own output.
 - Known and accepted: raw ANSI escapes remain in the log; a service that never binds a port always reports "not yet accepting connections" because readiness is port-bind-only.
+- Restart port reclaim, caught by CI on Linux and not reproducible on the developer machine: a slower host let the old listener outlive the 5s wait, the restart moved to a freshly derived port, and the service died with `Address already in use` because the launch command named the original port itself. Reproduced locally by forcing `FM_WORKER_API_RECLAIM_TIMEOUT=0`; the fix keeps the same port and launches anyway, verified to come up with a single registry line.

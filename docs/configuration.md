@@ -394,6 +394,7 @@ FM_WORKER_API_LOGDIR=   # dated service-log dir; exported by fm-spawn, defaults 
 FM_WORKER_API_PORT_BASE=8800   # low end of the deterministic service port window
 FM_WORKER_API_PORT_RANGE=200   # width of that window; the candidate is PORT_BASE + cksum(worktree) mod PORT_RANGE, then first free at/above it
 FM_WORKER_API_READY_TIMEOUT=20 # seconds `up` waits for the service to start accepting connections before reporting launched-not-yet-ready
+FM_WORKER_API_RECLAIM_TIMEOUT=15 # seconds a restart waits for the service it just killed to release its own port; exceeding it warns and launches anyway, never fails
 FM_WORKER_API_PORT_LOCK=       # port-allocation lock dir, default $TMPDIR/fm-worker-api-port.lock; held from port selection through bind so concurrent `up`s cannot claim one port
 FM_WORKER_API_PORT_LOCK_WAIT=30 # seconds to wait for that lock before launching without it; a lock problem must never block a launch
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
