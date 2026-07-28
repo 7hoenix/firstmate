@@ -16,6 +16,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 WAPI="$ROOT/bin/fm-worker-api.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worker-api)
 
 # The port lock is machine-wide by design (concurrent `up`s in different repos
@@ -386,6 +387,57 @@ assert_contains "$kt2_out" "http://127.0.0.1:8899" "the new service should then 
 wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_KILLED" --all >/dev/null 2>&1 || true
 pass "real tmux: a service whose tab was killed is cleared instead of blocking the worker's slot"
 
+# --- the pane env fm-spawn exports is sufficient on its own ------------------
+# The one seam nothing exercised behaviorally. Every other test hands the helper
+# --registry/--logdir, or sets them in the caller's environment; a real crewmate
+# gets them only from the line fm-spawn sends into its pane. So the contract could
+# drift - a renamed variable, a changed path - and every test here would still
+# pass while a real worker found no registry.
+#
+# Both halves are checked: that fm-spawn still exports those two names at those
+# paths, and that a pane holding ONLY that export can drive a full up.
+SPAWN_EXPORT=$(grep 'export GOTMPDIR=' "$ROOT/bin/fm-spawn.sh" | head -1)
+[ -n "$SPAWN_EXPORT" ] || fail "could not find fm-spawn's pane export line"
+# The single quotes are deliberate: these match fm-spawn's SOURCE TEXT, in which
+# $STATE/$ID/$DATA are literal characters awaiting expansion at spawn time.
+# shellcheck disable=SC2016
+case "$SPAWN_EXPORT" in
+  *'FM_WORKER_API_REGISTRY=$STATE/$ID.api-tabs'*) : ;;
+  *) fail "fm-spawn no longer exports FM_WORKER_API_REGISTRY as \$STATE/\$ID.api-tabs:"$'\n'"$SPAWN_EXPORT" ;;
+esac
+# shellcheck disable=SC2016
+case "$SPAWN_EXPORT" in
+  *'FM_WORKER_API_LOGDIR=$DATA/api-logs'*) : ;;
+  *) fail "fm-spawn no longer exports FM_WORKER_API_LOGDIR as \$DATA/api-logs:"$'\n'"$SPAWN_EXPORT" ;;
+esac
+
+# Now drive it the way a crewmate would: a pane carrying only that export.
+SPAWNID=spawnenv
+SPAWN_REG="$HOME_DIR/state/$SPAWNID.api-tabs"
+SPAWN_WIN=$("$REAL_TMUX" -L "$SOCKET" new-window -dP -F '#{window_id}' -t firstmate: -n "fm-$SPAWNID")
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SPAWN_WIN" \
+  "export GOTMPDIR=$TMP_ROOT/gotmp FM_WORKER_API_REGISTRY=$SPAWN_REG FM_WORKER_API_LOGDIR=$HOME_DIR/data/api-logs" Enter
+# No --registry, no --logdir, no inherited env: exactly what a worker types.
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SPAWN_WIN" \
+  "$WAPI up --port 8885 -- python3 -m http.server 8885" Enter
+spawn_ok=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  [ -s "$SPAWN_REG" ] && { spawn_ok=1; break; }
+  sleep 1
+done
+[ "$spawn_ok" = 1 ] \
+  || fail "a pane with only fm-spawn's export could not register a service:"$'\n'"$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SPAWN_WIN" 2>/dev/null | tail -8)"
+assert_grep "8885" "$SPAWN_REG" "the self-located registry should record the port"
+"$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' | grep -qx "fm-$SPAWNID-api" \
+  || fail "the service tab was not opened from the spawn-exported environment"
+SPAWN_LOGDIR_OK=$(cut -f5 "$SPAWN_REG")
+case "$SPAWN_LOGDIR_OK" in
+  "$HOME_DIR/data/api-logs/"*) : ;;
+  *) fail "the log did not land in the exported log dir, got: $SPAWN_LOGDIR_OK" ;;
+esac
+wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$SPAWN_REG" --all >/dev/null 2>&1 || true
+pass "real tmux: a pane carrying only fm-spawn's exported env can run up end to end"
+
 # --- down actually STOPS the service, not just its tab -----------------------
 # The feature's core guarantee. Closing the tab is not sufficient: verified on
 # Debian with util-linux script 2.38.1 that the pty puts the service in its own
@@ -496,6 +548,67 @@ assert_grep "fresh" "$REG_STALE" "the new label should be registered"
 wapi_tmux FM_WORKER_API_LOGDIR="$LOGDIR" "$WAPI" down --registry "$REG_STALE" --all >/dev/null 2>&1 || true
 pass "real tmux: a provably dead registered service is cleared instead of blocking a new up"
 
+# --- fm-teardown reaps the tab and keeps the log -----------------------------
+# Minimal scout task so teardown skips landed-work/worktree machinery: a
+# nonexistent worktree dir bypasses the treehouse return, and a present report
+# satisfies the scout carve-out. window=/backend= drive the reap.
+TASK_T=$("$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{session_name}:#{window_id}#{window_name}' \
+  | sed -n "s/^\(firstmate:@[0-9]*\)fm-$ID\$/\1/p" | head -1)
+[ -n "$TASK_T" ] || fail "could not resolve the task's own window"
+fm_write_meta "$HOME_DIR/state/$ID.meta" \
+  "window=$TASK_T" \
+  "worktree=$HOME_DIR/no-such-worktree" \
+  "project=$HOME_DIR/no-such-worktree" \
+  "harness=echo" \
+  "kind=scout" \
+  "mode=no-mistakes" \
+  "yolo=off" \
+  "backend=tmux"
+mkdir -p "$HOME_DIR/data/$ID"
+: > "$HOME_DIR/data/$ID/report.md"
+API_WINDOW_BEFORE=$("$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' | grep -c "fm-$ID-api")
+[ "$API_WINDOW_BEFORE" = "1" ] || fail "precondition: the api window should exist before teardown"
+
+td_out=$(env -u TMUX FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" TMUX="$SOCKET_PATH_TMUX" \
+  "$TEARDOWN" "$ID" 2>&1) || fail "teardown failed"$'\n'"$td_out"
+sleep 1
+if "$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' 2>/dev/null | grep -qx "fm-$ID-api"; then
+  fail "teardown did not reap the service window (orphan)"
+fi
+assert_absent "$REG" "teardown should remove the api-tabs registry file"
+assert_present "$LOGFILE" "teardown must KEEP the dated log (collected, not deleted)"
+pass "real tmux: fm-teardown reaps the registered service window and keeps the dated log"
+
+# --- teardown reaps the service even when the worktree return fails ----------
+# Regression: the reap used to run AFTER teardown_treehouse_return, so a failed
+# return aborted teardown with the service tab still live and serving - the exact
+# orphan this feature exists to prevent. A scout task skips the landed-work gate,
+# and a worktree dir that is not a treehouse checkout makes the return fail.
+FAILID=failret
+FAILREG="$HOME_DIR/state/$FAILID.api-tabs"
+FAILWT="$HOME_DIR/failret-worktree"
+mkdir -p "$FAILWT" "$HOME_DIR/data/$FAILID"
+: > "$HOME_DIR/data/$FAILID/report.md"
+fail_up=$(wapi_tmux FM_WORKER_API_REGISTRY="$FAILREG" FM_WORKER_API_LOGDIR="$LOGDIR" \
+  "$WAPI" up --port 8896 -- python3 -m http.server 8896) \
+  || fail "up failed for the teardown-ordering case"$'\n'"$fail_up"
+FAIL_TASK_T=$("$REAL_TMUX" -L "$SOCKET" new-window -dP -F '#{session_name}:#{window_id}' -t firstmate: -n "fm-$FAILID")
+fm_write_meta "$HOME_DIR/state/$FAILID.meta" \
+  "window=$FAIL_TASK_T" \
+  "worktree=$FAILWT" \
+  "project=$HOME_DIR/no-such-project" \
+  "harness=echo" \
+  "kind=scout" \
+  "mode=no-mistakes" \
+  "yolo=off" \
+  "backend=tmux"
+env -u TMUX FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" TMUX="$SOCKET_PATH_TMUX" \
+  "$TEARDOWN" "$FAILID" >/dev/null 2>&1 || true
+sleep 1
+if "$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' 2>/dev/null | grep -qx "fm-$FAILID-api"; then
+  fail "the service window survived a teardown whose worktree return failed (orphan)"
+fi
+pass "real tmux: teardown reaps the service window even when the worktree return fails"
 
 # --- sweep closes a real orphaned service window -----------------------------
 # The recovery-side backstop: a task that never reaches teardown (crash, lost

@@ -1084,7 +1084,11 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# FM_WORKER_API_REGISTRY/FM_WORKER_API_LOGDIR let the worker run
+# bin/fm-worker-api.sh to host a service in a visible, self-reaped sibling tab
+# (data/worker-api-tab-4d/rfc.md); the helper reads them from this pane env, and
+# fm-teardown.sh reaps the same registry path. STATE/DATA are absolute here.
+spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp FM_WORKER_API_REGISTRY=$STATE/$ID.api-tabs FM_WORKER_API_LOGDIR=$DATA/api-logs"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
