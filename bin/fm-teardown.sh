@@ -1029,19 +1029,36 @@ fi
 # process-GROUP leader, so the group kill below is what actually reaps it - and
 # for a pipeline the listener is a CHILD of the recorded process, which is why the
 # kill targets the group rather than the pid.
+# Mirrors bin/fm-worker-api.sh's own probe (both loopback families, since a
+# service bound only to ::1 is invisible to a v4 probe). Kept local rather than
+# sourced: teardown must not grow a dependency on the helper to clean up after it.
+worker_api_port_held() {  # <port> -> 0 when something is still listening
+  local p=$1
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && return 0
+  (exec 3<>"/dev/tcp/::1/$p") 2>/dev/null && return 0
+  return 1
+}
+
 reap_worker_api_tabs() {
-  local registry="$STATE/$ID.api-tabs" api_backend api_endpoint api_pid waited
+  local registry="$STATE/$ID.api-tabs" api_backend api_endpoint api_port api_pid waited
   [ -f "$registry" ] || return 0
   # `|| [ -n "$_api_label" ]` so a final record with no trailing newline (a
   # truncated write, a hand-edited file) is still reaped instead of silently
   # skipped - the one failure mode this reaper must never have.
-  while IFS=$'\t' read -r _api_label api_backend api_endpoint _api_port _api_log api_pid || [ -n "$_api_label" ]; do
+  while IFS=$'\t' read -r _api_label api_backend api_endpoint api_port _api_log api_pid || [ -n "$_api_label" ]; do
     [ -n "$api_endpoint" ] || continue
     fm_backend_sibling_down "$api_backend" "$api_endpoint" </dev/null 2>/dev/null || true
     # Pre-pid registries carry no sixth field; the tab close above is all that
     # was ever available for those, so skip rather than guess at a pid.
     case "${api_pid:-}" in ''|*[!0-9]*) continue ;; esac
     kill -0 "$api_pid" 2>/dev/null || continue
+    # Guard against pid REUSE. This registry outlives the process it describes,
+    # so a bare kill could destroy an unrelated process group that inherited the
+    # number - and teardown runs for every task, so that blast radius is the whole
+    # fleet. Only kill while the recorded port is still held: that is both the
+    # symptom being fixed and the evidence this pid is still our service.
+    worker_api_port_held "$api_port" || continue
     kill -TERM -- "-$api_pid" 2>/dev/null || kill -TERM "$api_pid" 2>/dev/null || true
     waited=0
     while [ "$waited" -lt 5 ] && kill -0 "$api_pid" 2>/dev/null; do
