@@ -597,6 +597,57 @@ fm_backend_reap_workspace() {  # <backend> <target> <workspace-id> <task-label>
   esac
 }
 
+# fm_backend_sibling_up: open a visible sibling SERVICE tab/window next to a
+# worker's own endpoint and launch <cmd> in it (bin/fm-worker-api.sh, the
+# on-demand-API tab). <container> is the worker's own container - a tmux session
+# name, or a herdr "<session>:<workspace_id>". Prints the endpoint the reap
+# registry records. Only the two verified backends implement this; the rest
+# refuse loudly (v1 scope is tmux + herdr).
+fm_backend_sibling_up() {  # <backend> <container> <label> <cwd> <cmd>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_sibling_up "$@" ;;
+    herdr) fm_backend_herdr_sibling_up "$@" ;;
+    *) echo "error: on-demand service tabs are not supported on backend '$backend' yet (v1: tmux, herdr)" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_sibling_down: close a service tab/window created by
+# fm_backend_sibling_up, given its recorded <endpoint>. Best-effort so teardown
+# never fails on an already-gone endpoint.
+fm_backend_sibling_down() {  # <backend> <endpoint>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    tmux) fm_backend_tmux_sibling_down "$@" ;;
+    herdr) fm_backend_herdr_sibling_down "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
+# fm_backend_sibling_alive: existence of a service tab/window created by
+# fm_backend_sibling_up. Three-valued via exit status, so a caller can act on a
+# CONFIDENT "gone" without ever acting on "I could not tell":
+#   0 - alive
+#   1 - confidently gone
+#   2 - unknown (unreadable server/session, or a backend with no service tabs)
+# This is deliberately separate from fm_backend_target_exists, whose tmux arm
+# uses `display-message` and therefore cannot report a window as gone at all
+# (see bin/backends/tmux.sh's fm_backend_tmux_sibling_alive for the evidence).
+fm_backend_sibling_alive() {  # <backend> <endpoint>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 2
+  case "$backend" in
+    tmux) fm_backend_tmux_sibling_alive "$@" ;;
+    herdr) fm_backend_herdr_sibling_alive "$@" ;;
+    *) return 2 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

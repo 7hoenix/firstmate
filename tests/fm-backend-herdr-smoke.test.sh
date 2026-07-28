@@ -345,6 +345,20 @@ assert_contains_local() { case "$1" in *"$2"*) : ;; *) fail "$3"$'\n'"--- got --
 assert_contains_local "$live" "$LABEL2" "list_live did not report the freshly created task tab by label"
 pass "real herdr: list_live discovers a live task tab by fm-<id> label"
 
+# --- sibling_up / sibling_down (bin/fm-worker-api.sh's on-demand service tab) --
+# A worker opens a labeled service tab in its OWN workspace ($CONTAINER is
+# fm-smoke2's "session:workspace_id"), runs a command, then it is reaped.
+SIB_WS=${CONTAINER#*:}
+SIB=$(fm_backend_herdr_sibling_up "$CONTAINER" "fm-smoke2-api" /tmp "echo herdr-sibling-ok") \
+  || fail "fm_backend_herdr_sibling_up failed"
+case "$SIB" in "$SESSION":*) : ;; *) fail "herdr sibling_up should print session:pane_id, got '$SIB'" ;; esac
+sib_tabs=$(fm_backend_herdr_cli "$SESSION" tab list --workspace "$SIB_WS")
+assert_contains_local "$sib_tabs" "fm-smoke2-api" "sibling_up did not create the labeled service tab in the workspace"
+fm_backend_herdr_sibling_down "$SIB"
+sib_state=$(fm_backend_herdr_pane_agent_state "$SESSION" "${SIB#*:}")
+[ "$sib_state" = dead ] || fail "sibling_down did not close the herdr service pane (state=$sib_state)"
+pass "real herdr: sibling_up opens a labeled service tab and runs the command; sibling_down closes it"
+
 fm_backend_herdr_kill "$SESSION:$PANE_ID2"
 
 cleanup_all
