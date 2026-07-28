@@ -388,6 +388,15 @@ GROK_HOME=              # optional Grok config home for firstmate's global grok 
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
+# worker-hosted on-demand services (bin/fm-worker-api.sh; docs/worker-api.md)
+FM_WORKER_API_REGISTRY= # reap registry path (state/<id>.api-tabs); exported into the worker's pane by fm-spawn, --registry overrides
+FM_WORKER_API_LOGDIR=   # dated service-log dir; exported by fm-spawn, defaults to <home>/data/api-logs, --logdir overrides
+FM_WORKER_API_PORT_BASE=8800   # low end of the deterministic service port window
+FM_WORKER_API_PORT_RANGE=200   # width of that window; the candidate is PORT_BASE + cksum(worktree) mod PORT_RANGE, then first free at/above it
+FM_WORKER_API_READY_TIMEOUT=20 # seconds `up` waits for the service to start accepting connections before reporting launched-not-yet-ready
+FM_WORKER_API_RECLAIM_TIMEOUT=15 # seconds a restart waits for the service it just killed to release its own port; exceeding it warns and launches anyway, never fails
+FM_WORKER_API_PORT_LOCK=       # port-allocation lock dir, default $TMPDIR/fm-worker-api-port.lock; held from port selection through bind so concurrent `up`s cannot claim one port
+FM_WORKER_API_PORT_LOCK_WAIT=30 # seconds to wait for that lock before launching without it; a lock problem must never block a launch
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# close any worker-hosted service tabs the task registered in state/<id>.api-tabs
+# (bin/fm-worker-api.sh; the reaper of last resort - workers crash, teardown runs),
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
@@ -990,6 +992,85 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# Close any worker-hosted service tabs this task opened (bin/fm-worker-api.sh), so
+# a visible on-demand-API tab and its server process are reaped and never
+# orphaned. The dated log the service wrote is deliberately KEPT (the captain
+# collects logs; bulk-pruned later via fm-worker-api.sh logs --prune-before); only
+# the tab and its process are reaped here.
+#
+# Placement is load-bearing, and this is the reason it runs here rather than
+# beside the pane kill further down. A service tab is a SEPARATE terminal
+# endpoint, independent of the worktree, so it can be reaped once the safety
+# gates above have passed. Reaping it later - after the worktree return - meant a
+# failed return aborted teardown with the service still running and its registry
+# about to be left behind: the exact orphan this feature exists to prevent.
+# Running before the herdr workspace reap is also still satisfied, since that
+# happens later: closing the API pane empties the per-task workspace so the reap
+# can then close it.
+#
+# One narrow window remains, deliberately: teardown_treehouse_return re-runs
+# validate_worktree_teardown_safety after stale-lock cleanup, so a teardown can
+# still refuse AFTER the service has been reaped. That is the lesser evil - the
+# alternative is the orphan above on every failed return - and by that point
+# teardown has already deleted the task branch and hook files anyway.
+#
+# Runs for EVERY backend, including orca. fm-worker-api.sh records the backend it
+# DETECTED from the pane env, not the task's backend, and fm-spawn.sh exports the
+# registry path into every crewmate pane - so an orca task whose pane sits inside
+# a tmux session can register a real service. Skipping the reap there while the
+# state cleanup below still deletes the registry would orphan that service
+# permanently, with nothing left for `sweep` to find. Dispatching per RECORDED
+# backend is what makes this safe: fm_backend_sibling_down is a no-op for a
+# backend it does not handle, so a line this teardown cannot act on costs nothing.
+# Closing the tab is not enough to stop the service. Verified on Debian with
+# util-linux script 2.38.1: the pty the service runs under puts it in its own
+# session, so the pane's SIGHUP never reaches it and both the pty and the service
+# keep running, still holding the port. The recorded pid is that session's
+# process-GROUP leader, so the group kill below is what actually reaps it - and
+# for a pipeline the listener is a CHILD of the recorded process, which is why the
+# kill targets the group rather than the pid.
+# Mirrors bin/fm-worker-api.sh's own probe (both loopback families, since a
+# service bound only to ::1 is invisible to a v4 probe). Kept local rather than
+# sourced: teardown must not grow a dependency on the helper to clean up after it.
+worker_api_port_held() {  # <port> -> 0 when something is still listening
+  local p=$1
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && return 0
+  (exec 3<>"/dev/tcp/::1/$p") 2>/dev/null && return 0
+  return 1
+}
+
+reap_worker_api_tabs() {
+  local registry="$STATE/$ID.api-tabs" api_backend api_endpoint api_port api_pid waited
+  [ -f "$registry" ] || return 0
+  # `|| [ -n "$_api_label" ]` so a final record with no trailing newline (a
+  # truncated write, a hand-edited file) is still reaped instead of silently
+  # skipped - the one failure mode this reaper must never have.
+  while IFS=$'\t' read -r _api_label api_backend api_endpoint api_port _api_log api_pid || [ -n "$_api_label" ]; do
+    [ -n "$api_endpoint" ] || continue
+    fm_backend_sibling_down "$api_backend" "$api_endpoint" </dev/null 2>/dev/null || true
+    # Pre-pid registries carry no sixth field; the tab close above is all that
+    # was ever available for those, so skip rather than guess at a pid.
+    case "${api_pid:-}" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$api_pid" 2>/dev/null || continue
+    # Guard against pid REUSE. This registry outlives the process it describes,
+    # so a bare kill could destroy an unrelated process group that inherited the
+    # number - and teardown runs for every task, so that blast radius is the whole
+    # fleet. Only kill while the recorded port is still held: that is both the
+    # symptom being fixed and the evidence this pid is still our service.
+    worker_api_port_held "$api_port" || continue
+    kill -TERM -- "-$api_pid" 2>/dev/null || kill -TERM "$api_pid" 2>/dev/null || true
+    waited=0
+    while [ "$waited" -lt 5 ] && kill -0 "$api_pid" 2>/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    kill -0 "$api_pid" 2>/dev/null || continue
+    kill -KILL -- "-$api_pid" 2>/dev/null || kill -KILL "$api_pid" 2>/dev/null || true
+  done < "$registry"
+}
+reap_worker_api_tabs
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -1048,7 +1129,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+# The worker-API reap registry is removed (the tabs it tracked are closed above);
+# the dated logs it points to live under data/api-logs/ and are deliberately kept.
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.api-tabs"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

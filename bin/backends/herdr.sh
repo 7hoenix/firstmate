@@ -1455,3 +1455,63 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   [ "$reader_rc" -eq 0 ] && return 1
   return 2
 }
+
+# fm_backend_herdr_sibling_up: open a sibling SERVICE tab in the worker's OWN
+# per-task workspace and launch <cmd> in it (bin/fm-worker-api.sh; the visible
+# on-demand-API tab). <container> is "<session>:<workspace_id>" - the worker's own
+# workspace, which the helper reads from the HERDR_WORKSPACE_ID env herdr injects
+# into every pane. A labeled tab in that workspace is a distinct, watchable entry
+# in the spaces sidebar. `pane run` submits <cmd> atomically. Prints the endpoint
+# "<session>:<pane_id>" the reap registry records; fm_backend_herdr_sibling_down
+# closes it. NOT lifecycle work: this only creates a tab in an already-live
+# workspace, exactly like fm_backend_herdr_create_task, so it needs no herdr-lab
+# isolation.
+fm_backend_herdr_sibling_up() {  # <container "session:workspace_id"> <label> <cwd> <cmd> -> prints "<session>:<pane_id>"
+  local container=$1 label=$2 cwd=$3 cmd=$4 session wsid out tab_id pane_id
+  session=${container%%:*}
+  wsid=${container#*:}
+  if [ -z "$session" ] || [ -z "$wsid" ] || [ "$wsid" = "$container" ]; then
+    echo "error: fm_backend_herdr_sibling_up needs a 'session:workspace_id' container, got '$container'" >&2
+    return 1
+  fi
+  fm_backend_herdr_server_ensure "$session" || return 1
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    echo "error: herdr sibling tab create returned no tab/pane id" >&2
+    return 1
+  fi
+  # Close the tab we just created if the command never reaches it: the caller
+  # writes no registry line on a non-zero return, so the tab would be left with
+  # nothing tracking it. The per-task workspace reap would eventually cover it,
+  # but only at teardown, and only for a workspace this home owns.
+  if ! fm_backend_herdr_send_text_line "$session:$pane_id" "$cmd"; then
+    fm_backend_herdr_kill "$session:$pane_id" 2>/dev/null || true
+    return 1
+  fi
+  printf '%s:%s\n' "$session" "$pane_id"
+}
+
+# fm_backend_herdr_sibling_down: close a service tab created by
+# fm_backend_herdr_sibling_up, given its "<session>:<pane_id>" endpoint. Closing
+# a tab's only pane closes the tab, and the hosted server process dies with the
+# pane. Best-effort, mirroring fm_backend_herdr_kill (which it reuses).
+fm_backend_herdr_sibling_down() {  # <endpoint "session:pane_id">
+  fm_backend_herdr_kill "$1"
+}
+
+# fm_backend_herdr_sibling_alive: does the service pane behind <endpoint> still
+# exist? Prints nothing; the exit status is the answer:
+#   0 - alive, the pane answers
+#   1 - CONFIDENTLY gone, the session answers but the pane does not
+#   2 - unknown, the endpoint is malformed or the session could not be read
+# The session-level probe is what separates "the pane is gone" from "the herdr
+# server is unreachable", so a dead server is never mistaken for a dead service.
+fm_backend_herdr_sibling_alive() {  # <endpoint "session:pane_id">
+  local session=${1%%:*} pane=${1#*:}
+  [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$1" ] || return 2
+  fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1 && return 0
+  fm_backend_herdr_cli "$session" workspace list >/dev/null 2>&1 || return 2
+  return 1
+}

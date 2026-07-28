@@ -165,3 +165,66 @@ fm_backend_tmux_agent_alive() {  # <target>
     *) printf 'unknown' ;;
   esac
 }
+
+# fm_backend_tmux_sibling_up: open a sibling SERVICE window in <session> next to
+# a worker's own window and launch <cmd> in it (bin/fm-worker-api.sh; the visible
+# on-demand-API tab). A separate window - not a split of the agent's own window -
+# is what makes it independently watchable and hop-into-able. Pins the name off
+# automatic-rename exactly like fm_backend_tmux_create_task so a captain's tmux
+# config cannot rename it away from the reap-critical label. Prints the endpoint
+# "<session>:<window_id>" the reap registry records; fm_backend_tmux_sibling_down
+# closes it. Targets the session with a trailing colon so a non-default
+# base-index cannot collide.
+fm_backend_tmux_sibling_up() {  # <session> <label> <cwd> <cmd> -> prints "<session>:<window_id>"
+  local ses=$1 label=$2 cwd=$3 cmd=$4 wid
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$label" -c "$cwd") || return 1
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  # Close the window we just created if the command never reaches it. The caller
+  # treats a non-zero return as "the tab was not opened" and writes no registry
+  # line, so leaving it behind would orphan a window nothing tracks or reaps -
+  # and unlike the task's own pane, a service window is a session-level sibling
+  # that no workspace reap covers.
+  if ! tmux send-keys -t "$wid" "$cmd" Enter; then
+    tmux kill-window -t "$ses:$wid" 2>/dev/null || true
+    return 1
+  fi
+  printf '%s:%s\n' "$ses" "$wid"
+}
+
+# fm_backend_tmux_sibling_down: close a service window created by
+# fm_backend_tmux_sibling_up, given its "<session>:<window_id>" endpoint.
+# kill-window kills every pane in the window, so the hosted server process dies
+# with it. Best-effort, mirroring fm_backend_tmux_kill.
+# Killing the endpoint is scoped to the recorded SESSION, and skipped entirely
+# unless that exact window is still there. A bare window id is only unique within
+# one tmux server lifetime - ids restart at @0 after a server restart, while
+# state/<id>.api-tabs survives on disk - so an unscoped kill of a stale id could
+# close an unrelated window, including a freshly spawned crewmate's own fm-<id>
+# window. Skipping on "confidently gone" is what makes a stale registry entry
+# harmless; skipping on "unknown" costs nothing, since an unreadable server has
+# nothing for us to kill anyway. Still best-effort and idempotent.
+fm_backend_tmux_sibling_down() {  # <endpoint "session:window_id">
+  fm_backend_tmux_sibling_alive "$1" || return 0
+  fm_backend_tmux_kill "$1"
+}
+
+# fm_backend_tmux_sibling_alive: does the service window behind <endpoint> still
+# exist? Prints nothing; the exit status is the answer:
+#   0 - alive, the window id is listed in the session
+#   1 - CONFIDENTLY gone, the session answers but does not list that window
+#   2 - unknown, the server or session could not be read at all
+#
+# Deliberately NOT `display-message -t <endpoint>`, which is what
+# fm_backend_target_exists uses: verified on tmux 3.6a that display-message
+# SUCCEEDS for a killed or nonexistent window (`-t firstmate:@99` prints the
+# session's current pane and exits 0), so it can never report a window as gone.
+# list-windows enumerates real window ids, so an exact match is a true existence
+# test, and has-session separates "window gone" from "cannot read the server".
+fm_backend_tmux_sibling_alive() {  # <endpoint "session:window_id">
+  local endpoint=$1 ses=${1%%:*}
+  tmux list-windows -t "$ses" -F '#{session_name}:#{window_id}' 2>/dev/null \
+    | grep -Fqx "$endpoint" && return 0
+  tmux has-session -t "$ses" >/dev/null 2>&1 || return 2
+  return 1
+}
