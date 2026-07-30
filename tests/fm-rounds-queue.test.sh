@@ -67,16 +67,23 @@ task() {
               open_decisions:$decs, scout_report_present:$rep, last_event_text:"t" } }'
 }
 
-# row <id> <state> <kind> [priority] [hold] [hold_until] [blocked_by] [completion-verb]
+# row <id> <state> <kind> [priority] [hold] [hold_until] [blockers] [completion-verb]
+#
+# <blockers> is a space-separated list, because a backlog row may name more than
+# one blocker. It mirrors the real snapshot contract on both fields: blocked_by
+# is the LAST token (the greedy single-value capture) and blocked_by_all is the
+# ordered array of all of them.
 row() {
   local id=$1 st=$2 kind=$3 prio=${4:-} hold=${5:-} until=${6:-} blocked=${7:-} comp=${8:-}
   jq -n --arg id "$id" --arg st "$st" --arg kind "$kind" \
         --arg prio "$prio" --arg hold "$hold" --arg until "$until" \
         --arg blocked "$blocked" --arg comp "$comp" '
     def nn: if . == "" then null else . end;
+    ($blocked | split(" ") | map(select(. != ""))) as $blockers |
     { order:1, state:$st, structured:true, id:$id, checked:false,
       title:("title of " + $id), repo:"demo", kind:$kind,
-      priority:($prio|nn), blocked_by:($blocked|nn), blocked_reason:null,
+      priority:($prio|nn), blocked_by:($blockers | last),
+      blocked_by_all:$blockers, blocked_reason:null,
       hold:($hold|nn), hold_kind:(if ($hold|nn)==null then null else "captain" end),
       hold_until:($until|nn),
       since:"2026-07-01", merged:null, reported:null, done:null,
@@ -319,6 +326,43 @@ OUT=$(run_rounds "$SNAP")
 [ "$(jq -r '.count_walk' <<<"$OUT")" = 0 ] || fail "dispatchable is firstmate's call, never walked"
 [ "$(jq -r '.count_quiet' <<<"$OUT")" = 1 ] || fail "queued work behind an open blocker stays quiet"
 pass "dispatchable work is batched and queued-behind-a-blocker stays quiet"
+
+# A row may name SEVERAL blockers. blocked_by keeps only the last one, so reading
+# it alone would dispatch work whose first dependency is still queued - the one
+# bucket /rounds acts on without asking.
+SNAP="$TMP_ROOT/multi-blocked.json"
+snapshot "$SNAP" "[]" \
+  "[$(row first-blocker queued ship),
+    $(row multi-blocked queued ship '' '' '' 'first-blocker landed-blocker')]"
+OUT=$(run_rounds "$SNAP" --all)
+[ "$(jq -r '[.dispatchable[].id] | join(",")' <<<"$OUT")" = first-blocker ] ||
+  fail "an item whose FIRST blocker is still open must not be dispatchable"
+[ "$(jq -r '.quiet[] | select(.id=="multi-blocked") | .why' <<<"$OUT")" = waiting-on-another ] ||
+  fail "an item with any open blocker stays quiet as waiting-on-another"
+pass "a row whose first of two blockers is still open is not dispatchable"
+
+# Once EVERY blocker has cleared, the same row is dispatchable.
+SNAP="$TMP_ROOT/multi-cleared.json"
+snapshot "$SNAP" "[]" \
+  "[$(row multi-cleared queued ship '' '' '' 'gone-a gone-b')]"
+OUT=$(run_rounds "$SNAP" --all)
+[ "$(jq -r '[.dispatchable[].id] | join(",")' <<<"$OUT")" = multi-cleared ] ||
+  fail "an item whose blockers have all cleared should be dispatchable"
+pass "a row with two blockers becomes dispatchable once both have cleared"
+
+# Boundary: a row that names a blocker but whose array is missing or unreadable
+# counts as BLOCKED. A false "still blocked" costs one deferred dispatch; a false
+# "dispatchable" starts work on a dependency that has not landed.
+for BAD in null '"first-blocker"' '[]'; do
+  SNAP="$TMP_ROOT/blockers-unreadable.json"
+  snapshot "$SNAP" "[]" \
+    "[$(row first-blocker queued ship),
+      $(jq --argjson bad "$BAD" '.blocked_by_all = $bad' <<<"$(row unreadable queued ship '' '' '' first-blocker)")]"
+  OUT=$(run_rounds "$SNAP" --all)
+  [ "$(jq -r '[.dispatchable[].id] | join(",")' <<<"$OUT")" = first-blocker ] ||
+    fail "an unreadable blocker array ($BAD) must not read as dispatchable"
+done
+pass "a named blocker with an unreadable blocker array is treated as blocked"
 
 # --- priority ordering -------------------------------------------------------
 

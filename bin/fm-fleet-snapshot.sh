@@ -14,6 +14,10 @@
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
+#     blocked_by is the LAST blocked-by token on the row; blocked_by_all is the
+#     ordered array of EVERY blocked-by token on it. A row may name more than one
+#     blocker, so a consumer deciding whether an item may be dispatched must read
+#     blocked_by_all and treat the item as blocked while ANY of them is open.
 #     hold/hold_kind/hold_until carry a structured tasks-axi dispatch hold, and
 #     are null on an unheld row. A hold with hold_until is a date gate: it is
 #     inactive on and after that date, so a consumer deciding whether a hold
@@ -198,6 +202,12 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
       | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
       | clean_title;
+    # blocked_by captures only the LAST blocked-by token on the row (its leading
+    # .* is greedy), which is a lossy read of a row that names several blockers.
+    # blockers() scans EVERY token in written order so a consumer deciding
+    # whether an item may be dispatched can require all of them to be resolved.
+    def blockers($rest):
+      [$rest | scan("blocked-by:[[:space:]]*([^[:space:])]+)") | .[0]];
     def blocked_reason($rest):
       cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
       | if $reason == null then null
@@ -242,6 +252,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              kind:metadata($rest; "kind"),
              priority:metadata($rest; "priority"),
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
+             blocked_by_all:blockers($rest),
              blocked_reason:blocked_reason($rest),
              hold:hold_field($rest; "hold"),
              hold_kind:hold_field($rest; "hold-kind"),

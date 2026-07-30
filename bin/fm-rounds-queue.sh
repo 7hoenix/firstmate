@@ -75,6 +75,15 @@
 # caveat. As a per-lane reason it fired on 8 of 19 walk items and buried the real
 # work behind eight copies of the same finding.
 #
+# BLOCKERS. `dispatchable` is the one bucket /rounds acts on without asking, so it
+# reads the snapshot's blocked_by_all array, not its single-value blocked_by: that
+# field keeps only the LAST blocked-by token on a row, and dispatching on it alone
+# starts work whose first dependency has not landed, against AGENTS.md s7's "only
+# queued work whose blockers are gone". An item is blocked while ANY of its
+# blockers is still open. A row that names a blocker but whose array is missing or
+# unreadable counts as blocked too: a false "still blocked" costs one deferred
+# dispatch, a false "dispatchable" starts work on an unmet dependency.
+#
 # PRIORITY. Read from the backlog row's tasks-axi priority field (0-4, 0 highest);
 # there is no second store. Unset sorts as 2 (medium) and is flagged priority_set
 # false so the presenter can offer to set it rather than bury the item.
@@ -161,6 +170,7 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
   | ($snap.backlog.records // []) as $recs
   | ($recs | map(select(.structured == true))) as $rows
   | ($rows | map(select(.state == "in_flight" or .state == "queued"))) as $open
+  | ($open | map(.id)) as $open_ids
   | (reduce $rows[] as $r ({}; .[$r.id] = $r)) as $bmap
   | (reduce $tasks[] as $t ({}; .[$t.id] = $t)) as $tmap
 
@@ -204,9 +214,18 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
     def prio_word($p):
       if $p == 0 then "urgent" elif $p == 1 then "high" elif $p == 2 then "medium"
       elif $p == 3 then "low" elif $p == 4 then "someday" else "medium" end;
-    def blocker_open($b):
+    def blockers($b):
+      if $b == null then []
+      elif ($b.blocked_by_all | type) == "array" then $b.blocked_by_all
+      elif $b.blocked_by != null then [$b.blocked_by]
+      else [] end;
+    def blockers_unreadable($b):
       $b != null and $b.blocked_by != null
-      and ($open | map(.id) | index($b.blocked_by)) != null;
+      and (($b.blocked_by_all | type) != "array"
+           or ($b.blocked_by_all | length) == 0);
+    def blocker_open($b):
+      blockers_unreadable($b)
+      or (blockers($b) | any(. as $bid | ($open_ids | index($bid)) != null));
 
   # ---- the union set ------------------------------------------------------
     ((($tasks | map(.id)) + ($open | map(.id))) | unique) as $ids

@@ -78,10 +78,16 @@ pass() {
 # survives, and $$ stays the sourcing shell's pid inside a subshell, so the
 # registry path is the same on both sides. The array remains supported for the
 # callers that append to it directly from the top-level shell.
+#
+# Initialization is guarded on the registry being unset, the same idempotence the
+# FM_TEST_LIB_SOURCED guard above gives the rest of the file: truncating an
+# already-populated registry would strand every directory registered before it.
 
-FM_TEST_CLEANUP_DIRS=()
-FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.$$"
-rm -f "$FM_TEST_CLEANUP_REGISTRY"
+if [ -z "${FM_TEST_CLEANUP_REGISTRY:-}" ]; then
+  FM_TEST_CLEANUP_DIRS=()
+  FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.$$"
+  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+fi
 
 fm_test_cleanup() {
   local d

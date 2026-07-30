@@ -265,6 +265,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] queued-comma - Queued Comma Task (repo: beta, since 2026-07-08) (kind: ship)
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
+- [ ] multi-blocked - Multi Blocked (repo: beta) (kind: ship) blocked-by: queued-comma blocked-by: parenthetical-title
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
@@ -313,8 +314,19 @@ EOF
     | .title == "Blocked Reason"
       and .repo == "beta"
       and .blocked_by == "queued-comma"
+      and .blocked_by_all == ["queued-comma"]
       and .blocked_reason == "waits on queued-comma"
   ' >/dev/null || fail "blocked suffix did not parse into title and reason"
+  # A row may name SEVERAL blockers. blocked_by keeps only the last (its capture
+  # is greedy), so blocked_by_all must carry every token for a consumer deciding
+  # whether the item may be dispatched.
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "multi-blocked")
+    | .title == "Multi Blocked"
+      and .repo == "beta"
+      and .blocked_by == "parenthetical-title"
+      and .blocked_by_all == ["queued-comma", "parenthetical-title"]
+  ' >/dev/null || fail "a multi-blocker row did not parse every blocked-by token"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"
