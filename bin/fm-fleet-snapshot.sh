@@ -14,6 +14,11 @@
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
+#     hold/hold_kind/hold_until carry a structured tasks-axi dispatch hold, and
+#     are null on an unheld row. A hold with hold_until is a date gate: it is
+#     inactive on and after that date, so a consumer deciding whether a hold
+#     still suppresses an item must compare hold_until against today rather
+#     than treating hold presence alone as suppression.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
@@ -175,7 +180,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def links($rest): [$rest | scan(url_pattern)];
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
-        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
+        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold-until|hold-kind|hold):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
     def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
@@ -200,6 +205,12 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         end;
     def local_note($rest):
       cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
+    # Hold tokens need their own capture rather than metadata above: a hold
+    # reason may contain commas ("waiting on vendor, then retry"), which the
+    # [^,)] class in metadata would truncate. tasks-axi forbids parentheses in
+    # a reason, so [^)] is the safe terminator. hold-until is optional.
+    def hold_field($rest; $key):
+      cap($rest; ".*\\([[:space:]]*" + $key + ":[[:space:]]*(?<v>[^)]*)\\)");
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -232,6 +243,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              priority:metadata($rest; "priority"),
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
              blocked_reason:blocked_reason($rest),
+             hold:hold_field($rest; "hold"),
+             hold_kind:hold_field($rest; "hold-kind"),
+             hold_until:hold_field($rest; "hold-until"),
              since:metadata_word($rest; "since"),
              merged:metadata_word($rest; "merged"),
              reported:metadata_word($rest; "reported"),

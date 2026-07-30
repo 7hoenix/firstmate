@@ -707,7 +707,9 @@ When hand-editing, prune older Done entries manually whenever you add to the sec
 Pruning loses nothing: finished PR-based ship tasks live on as GitHub PRs, local-only ship tasks live on in local `main`, and scout tasks live on as report files.
 Map firstmate's real backlog operations to the approved commands:
 
-- File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
+- File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name> --priority <0-4>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
+  Priority is the captain's ranking and the backlog is its only store: 0 urgent, 1 high, 2 medium (the default reading when unset), 3 low, 4 someday.
+  Set it at dispatch, or later with `tasks-axi update <id> --priority <n>`; speak the word to the captain, never the number.
 - Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that blockers are gone and any time/date gate has arrived.
 - Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
 - Update task notes: inspect first with `tasks-axi show <id> --full`, then replace the considered body with `tasks-axi update <id> --body-file <path>`.
