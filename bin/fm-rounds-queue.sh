@@ -40,8 +40,11 @@
 # BUCKETS. `unreliable` is tested BEFORE `captain`, because a lane whose recorded
 # state contradicts itself must never be presented as a state claim - see the
 # contradiction detectors below. Then `captain` (present one at a time), then
-# `dispatchable` (firstmate's own call under AGENTS.md s7, reported as one batched
-# line, never asked about), then `quiet` (silent unless --all).
+# `dispatchable` (reported as ONE batched confirm line the captain answers), then
+# `quiet` (silent unless --all). `dispatchable` proves only that no blocker is
+# open on the row; it does NOT prove the item is free of the same-files/same-
+# subsystem overlap AGENTS.md s7 also calls blocked, so /rounds proposes that
+# batch and never starts it on its own.
 #
 # CONTRADICTION DETECTORS. Each exists because it fired on real fleet state:
 #   dead-lane-run    endpoint gone and current_state came from a run-step, AND
@@ -75,18 +78,21 @@
 # caveat. As a per-lane reason it fired on 8 of 19 walk items and buried the real
 # work behind eight copies of the same finding.
 #
-# BLOCKERS. `dispatchable` is the one bucket /rounds acts on without asking, so it
-# reads the snapshot's blocked_by_all array, not its single-value blocked_by: that
-# field keeps only the LAST blocked-by token on a row, and dispatching on it alone
-# starts work whose first dependency has not landed, against AGENTS.md s7's "only
-# queued work whose blockers are gone". An item is blocked while ANY of its
-# blockers is still open. A row that names a blocker but whose array is missing or
-# unreadable counts as blocked too: a false "still blocked" costs one deferred
-# dispatch, a false "dispatchable" starts work on an unmet dependency.
+# BLOCKERS. `dispatchable` is the one bucket offered as a batch rather than walked
+# item by item, so it reads the snapshot's blocked_by_all array, not its
+# single-value blocked_by: that field keeps only the LAST blocked-by token on a
+# row, and proposing on it alone offers work whose first dependency has not landed,
+# against AGENTS.md s7's "only queued work whose blockers are gone". An item is
+# blocked while ANY of its blockers is still open. A row that names a blocker but
+# whose array is missing or unreadable counts as blocked too: a false "still
+# blocked" costs one deferred dispatch, a false "dispatchable" offers work on an
+# unmet dependency.
 #
 # PRIORITY. Read from the backlog row's tasks-axi priority field (0-4, 0 highest);
 # there is no second store. Unset sorts as 2 (medium) and is flagged priority_set
-# false so the presenter can offer to set it rather than bury the item.
+# false so the presenter can offer to set it rather than bury the item. A value
+# outside 0-4 - reachable because a hand-edited backlog has no validator - reads as
+# unset, so the word, the sort, and the offer-to-set flag can never disagree.
 #
 # SORT: priority ascending first, then tier - contradiction-severity items ahead of
 # captain items, bookkeeping-severity items after them - then oldest first, then id.
@@ -210,7 +216,9 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
       $b != null and ($b.state == "done" or $b.completion.verb == "merged");
     def prio($b):
       if $b == null or $b.priority == null then null
-      else ($b.priority | tonumber? // null) end;
+      else ($b.priority | tonumber? // null)
+           | if . != null and (. < 0 or . > 4) then null else . end
+      end;
     def prio_word($p):
       if $p == 0 then "urgent" elif $p == 1 then "high" elif $p == 2 then "medium"
       elif $p == 3 then "low" elif $p == 4 then "someday" else "medium" end;
@@ -289,6 +297,11 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               # review. Without this branch a landed PR is presented as needing a
               # merge the captain already gave.
               elif $st == "done" and $pr_landed then "ready-to-stand-down"
+              # The run-step detail is not the only place a merge shows up: the
+              # backlog row records it too, and `tasks-axi done` before teardown -
+              # or a local-only merge - lands there first. Without this the lane
+              # reads pr-ready and re-asks for a merge the captain already gave.
+              elif $st == "done" and landed($b) then "ready-to-stand-down"
               elif $st == "done" and ($t.pr.url // null) != null then "pr-ready"
               elif $st == "done" and $t.mode == "local-only" then "review-diff"
               elif $st == "done" and $t.kind == "scout"

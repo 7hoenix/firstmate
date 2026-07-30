@@ -285,6 +285,18 @@ OUT=$(run_rounds "$SNAP")
   fail "checks green with the PR awaiting review is still pr-ready"
 pass "the two terminal run outcomes are told apart by detail, not collapsed into pr-ready"
 
+# The merge may be recorded on the BACKLOG ROW rather than in the run-step detail -
+# `tasks-axi done` before teardown, or a local-only merge. The same re-ask must not
+# happen through that door either.
+SNAP="$TMP_ROOT/done-merged-row.json"
+snapshot "$SNAP" \
+  "[$(task rowmerged ship 'done' pane true 0 /wt/rowmerged no-mistakes https://x/pull/3 false 'checks green: PR ready for review')]" \
+  "[$(row rowmerged 'done' ship '' '' '' '' merged)]"
+OUT_ROW=$(run_rounds "$SNAP")
+[ "$(why_of "$OUT_ROW" rowmerged)" = ready-to-stand-down ] ||
+  fail "a lane whose backlog row already records the merge must not be re-asked as pr-ready"
+pass "a merge recorded only on the backlog row also classifies ready-to-stand-down"
+
 # Neither lane here is quiet, so nothing may advertise a reveal flag with nothing
 # behind it - the same gate the held, landed, and truncation surfaces already use.
 [ "$(jq -r '.count_quiet' <<<"$OUT")" = 0 ] || fail "fixture should have no quiet lanes"
@@ -323,13 +335,13 @@ snapshot "$SNAP" "[]" \
     $(row blocked-on queued ship '' '' '' ready-1)]"
 OUT=$(run_rounds "$SNAP")
 [ "$(jq -r '.count_dispatchable' <<<"$OUT")" = 2 ] || fail "unblocked queued work is dispatchable"
-[ "$(jq -r '.count_walk' <<<"$OUT")" = 0 ] || fail "dispatchable is firstmate's call, never walked"
+[ "$(jq -r '.count_walk' <<<"$OUT")" = 0 ] || fail "dispatchable is batched, never walked"
 [ "$(jq -r '.count_quiet' <<<"$OUT")" = 1 ] || fail "queued work behind an open blocker stays quiet"
 pass "dispatchable work is batched and queued-behind-a-blocker stays quiet"
 
 # A row may name SEVERAL blockers. blocked_by keeps only the last one, so reading
-# it alone would dispatch work whose first dependency is still queued - the one
-# bucket /rounds acts on without asking.
+# it alone would offer work whose first dependency is still queued as ready to
+# start.
 SNAP="$TMP_ROOT/multi-blocked.json"
 snapshot "$SNAP" "[]" \
   "[$(row first-blocker queued ship),
@@ -385,6 +397,25 @@ OUT=$(run_rounds "$SNAP")
 [ "$(jq -r '.walk[] | select(.id=="p-urgent") | .priority_word' <<<"$OUT")" = urgent ] ||
   fail "priority 0 must present as urgent"
 pass "priority orders the walk, and unset sorts as medium while staying flagged"
+
+# A hand-edited backlog has no validator, so a value outside 0-4 is reachable. It
+# reads as unset: the word, the sort position, and the offer-to-set flag must all
+# agree rather than rendering medium while sorting past someday.
+SNAP="$TMP_ROOT/prio-range.json"
+snapshot "$SNAP" \
+  "[$(task p-bogus ship blocked pane true 0),
+    $(task p-low ship blocked pane true 0),
+    $(task p-real-high ship blocked pane true 0)]" \
+  "[$(row p-bogus in_flight ship 7), $(row p-low in_flight ship 3),
+    $(row p-real-high in_flight ship 1)]"
+OUT=$(run_rounds "$SNAP")
+[ "$(jq -r '[.walk[].id] | join(",")' <<<"$OUT")" = "p-real-high,p-bogus,p-low" ] ||
+  fail "an out-of-range priority must sort where its word says it does"
+[ "$(jq -r '.walk[] | select(.id=="p-bogus") | .priority_word' <<<"$OUT")" = medium ] ||
+  fail "an out-of-range priority must present as medium"
+[ "$(jq -r '.walk[] | select(.id=="p-bogus") | .priority_set' <<<"$OUT")" = false ] ||
+  fail "an out-of-range priority must be flagged so the presenter can offer to correct it"
+pass "an out-of-range priority reads as unset in word, sort, and flag alike"
 
 # --- workspace conflicts are one fleet fact, not N items ---------------------
 

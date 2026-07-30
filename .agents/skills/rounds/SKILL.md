@@ -39,7 +39,8 @@ Never produce a bearings-style four-section digest from here, and never write a 
    Record the answer per the table below before moving on, so the next `bin/fm-rounds-queue.sh` run reflects it.
 
 5. **Close the walk.**
-   Report what was actioned, then the batched surfaces: the dispatchable count you are starting, and `conflicts[]` if non-empty.
+   Report what was actioned, then the batched surfaces: `dispatchable[]` as ONE confirm line the captain answers, and `conflicts[]` if non-empty.
+   Name that work in plain language, recommend starting it, and wait for their word - the queue proves only that nothing is blocking those items on paper, never that they steer clear of work already under way, so starting them is the captain's call and not the walk's.
    If the walk produced a standing preference ("anything touching money is always urgent"), suggest `/stow` in one line and stop.
 
 ## Priority
@@ -124,7 +125,7 @@ This skill changes which question is asked and in what order; it changes no appr
 1. Never merge without the captain's word in this walk (`AGENTS.md` prime directive 2). Under a project's `yolo=on` the existing relaxation applies unchanged - but `yolo` is read from the project's recorded posture, never inferred because the captain is answering decisively.
 2. Never resolve an ask-user finding on the captain's behalf under `yolo=off`. Relay it verbatim.
 3. Never tear down anything without asking, and never treat a merge as teardown consent. A pane may host captain-driven work long after its task looks finished, so the pre-teardown peek is mandatory even after a yes.
-4. Never dispatch work the captain has held.
+4. Never dispatch work the captain has held, and never start the batch of ready work without their yes - that batch is a proposal, not a decision.
 5. Never change a priority the captain did not ask to change. Propose, do not assign.
 6. Never end a turn blind: if work is in flight, the harness supervision protocol must be live behind every message that waits on the captain.
 7. Never take an action from the `quiet` bucket beyond the two it already carries: `bin/fm-pause-ack.sh` on a confirmed declared wait, and one short `bin/fm-send.sh` steer to a crew parked on its own gate.
