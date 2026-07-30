@@ -25,6 +25,7 @@ Never produce a bearings-style four-section digest from here, and never write a 
 1. **Get the queue.**
    Run `bin/fm-rounds-queue.sh`.
    Read `count_*` for the shape, `walk[]` for the ordered items, `conflicts[]` and `dispatchable[]` for the two batched surfaces.
+   Every `count_*` describes the full queue before any `--limit`; `shown` is how many `walk[]` entries you actually have, and `walk[].pos` runs 1 to `shown`.
 
 2. **Open with one orienting line, then the first item.**
    One sentence: how many things need them, and that everything else is handled.
@@ -56,7 +57,7 @@ The bearings relaxation does NOT apply here, because that exists only for a giti
 Each `bucket: captain` item renders these six lines and nothing else:
 
 ```
-[<pos> of <total>] <project> - <what this work is>       <priority word>
+[<pos> of <shown>] <project> - <what this work is>       <priority word>
 State:    <one sentence: where it actually stands>
 Needs:    <one sentence: what is being asked of the captain>
 Options:  <A / B / ... verbatim from the finding, when there is a real choice>
@@ -72,7 +73,7 @@ Then:     <what happens once they answer>
 A `bucket: unreliable` item renders a DIFFERENT block, and never asserts a state:
 
 ```
-[<pos> of <total>] <project> - <work>       ⚠ state unclear
+[<pos> of <shown>] <project> - <work>       ⚠ state unclear
 What I can see:  <the contradiction, plainly>
 What I don't:    <what cannot be determined without checking>
 I'd say:         <the specific check to run>
@@ -92,7 +93,7 @@ This is what makes the walk survive an interruption, a context reset, and a rest
 | --- | --- |
 | Answers a decision | relay through the gate the finding came from, so the crew closes it with its `resolved [key=...]` line |
 | "Merge it" | `bin/fm-pr-merge.sh <id> <full PR URL>` |
-| "Not now" | `tasks-axi hold <id> --reason "<their words>" --kind captain` |
+| "Not now" | `tasks-axi hold <id> --reason "<their words>" --kind captain --until <YYYY-MM-DD>`, dating it far enough out to be a real deferral and saying the date back to them |
 | "Not until Friday" | `tasks-axi hold <id> --reason "<their words>" --until <YYYY-MM-DD>` |
 | "Leave it running" | `bin/fm-pause-ack.sh <id>` |
 | "That's urgent" / "that's low" | `tasks-axi update <id> --priority <n>` |
@@ -100,7 +101,9 @@ This is what makes the walk survive an interruption, a context reset, and a rest
 | Missing backlog row | `tasks-axi add <id> "<title>" --kind <k> --repo <r> --start` |
 
 Never record a skip with no reason - that silently loses the item.
-A recorded hold is visible in the backlog and re-surfaces when the reason expires.
+Every recorded hold is visible in the backlog, but only a dated one comes back on its own: a `--until` hold stops suppressing the item on and after that date, and the item returns to the walk as `gate-arrived`.
+A hold recorded with no `--until` never expires, so it suppresses the item until someone lifts it by hand - which is why "Not now" gets a date.
+Either way a hold never hides a live problem: an item with an open decision, or one that goes blocked or failed, walks anyway.
 
 ## Surviving interruption
 

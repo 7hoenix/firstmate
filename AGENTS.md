@@ -678,10 +678,11 @@ Update the backlog on every dispatch, completion, and decision for a work item.
 
 ```markdown
 ## In flight
-- [ ] <id> - <one line> (repo: <name>, since <date>)
+- [ ] <id> - <one line> (repo: <name>, since <date>) (priority: <0-4>)
 
 ## Queued
-- [ ] <id> - <one line> (repo: <name>) blocked-by: <id> - <reason>
+- [ ] <id> - <one line> (repo: <name>) (priority: <0-4>) blocked-by: <id> - <reason>
+- [ ] <id> - <one line> (repo: <name>) (priority: <0-4>) (hold: <reason>) (hold-kind: captain) (hold-until: <date>)
 
 ## Done
 - [x] <id> - <one line> - <https://github.com/owner/repo/pull/number> (merged <date>)

@@ -66,28 +66,44 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# on EXIT. The cleanup trap is installed here, at source time, in the SOURCING
+# shell. A test file that needs extra teardown (e.g. killing a daemon) should
+# define its own EXIT trap and call fm_test_cleanup from inside it so registered
+# dirs are still removed.
+#
+# Registration goes through a file, not only the array, because the universal
+# call form is `TMP_ROOT=$(fm_test_tmproot x)`: command substitution runs the
+# function in a SUBSHELL, so an array append (or a trap installed) in there dies
+# with that subshell and the directory is never cleaned up. A file append
+# survives, and $$ stays the sourcing shell's pid inside a subshell, so the
+# registry path is the same on both sides. The array remains supported for the
+# callers that append to it directly from the top-level shell.
 
 FM_TEST_CLEANUP_DIRS=()
+FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.$$"
+rm -f "$FM_TEST_CLEANUP_REGISTRY"
 
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] && rm -rf "$d"
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
 }
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
-  FM_TEST_CLEANUP_DIRS+=("$root")
+  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"
   printf '%s\n' "$root"
 }
+
+trap fm_test_cleanup EXIT
 
 # --- fakebin / PATH shims ---------------------------------------------------
 #

@@ -26,6 +26,13 @@
 #                        the noise /rounds exists to remove. tasks-axi defines an
 #                        --until gate as inactive ON and after that date, so an
 #                        arrived gate is NOT a drop - it becomes a captain item.
+#                        EXEMPT: a hold never suppresses a lane with a LIVE PROBLEM -
+#                        an open decision, or current_state blocked or failed. An
+#                        undated hold never expires, so without this a "not now" on a
+#                        lane that later parks on a captain decision would bury that
+#                        decision permanently. The captain deferred the work, not a
+#                        crew stuck waiting on them. A held row with no such live
+#                        signal is dropped exactly as before.
 #
 # BUCKETS. `unreliable` is tested BEFORE `captain`, because a lane whose recorded
 # state contradicts itself must never be presented as a state claim - see the
@@ -59,7 +66,12 @@
 # there is no second store. Unset sorts as 2 (medium) and is flagged priority_set
 # false so the presenter can offer to set it rather than bury the item.
 #
-# SORT: priority asc, then unreliable before captain, then oldest first, then id.
+# SORT: priority ascending first, then tier - contradiction-severity items ahead of
+# captain items, bookkeeping-severity items after them - then oldest first, then id.
+#
+# COUNTS: every count_* describes the same population, the FULL pre-limit set, so
+# there is exactly one unambiguous total per surface. `shown` is the separate field
+# for how many walk[] entries --limit actually left; walk[].pos runs 1..shown.
 #
 # Flags:
 #   (default)      TOON, captain + unreliable + dispatchable
@@ -154,6 +166,16 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
   | def hold_active($b):
       $b != null and $b.hold != null
       and (($b.hold_until == null) or ($today < $b.hold_until));
+    # A live problem outranks a captain-recorded deferral. An undated hold never
+    # expires, so suppressing on hold alone would bury an open decision - or a
+    # blocked/failed lane, the same class of live problem - for good.
+    def live_problem($t):
+      $t != null
+      and (((($t.hints.open_decisions // []) | length) > 0)
+           or ($t.current_state.state == "blocked")
+           or ($t.current_state.state == "failed"));
+    def suppressed($m):
+      hold_active($m.b) and (live_problem($m.t) | not);
     def gate_arrived($b):
       $b != null and $b.hold != null
       and $b.hold_until != null and ($today >= $b.hold_until);
@@ -175,13 +197,14 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
 
   # ---- drops -------------------------------------------------------------
   | ($members | map(select(.t != null and .t.kind == "secondmate"))) as $d_sub
-  | ($members | map(select((.t == null or .t.kind != "secondmate") and hold_active(.b)))) as $d_held
+  | ( $members
+      | map(select((.t == null or .t.kind != "secondmate") and suppressed(.))) ) as $d_held
   | ( $rows
       | map(select(.state == "done" and ($tmap[.id] == null))) ) as $d_done
   | ( $members
       | map(select(
           (.t == null or .t.kind != "secondmate")
-          and (hold_active(.b) | not))) ) as $live
+          and (suppressed(.) | not))) ) as $live
 
   # ---- classification ----------------------------------------------------
   | ( $live
@@ -192,6 +215,8 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
           | ($t.current_state.source // null) as $src
           | (($t.hints.open_decisions // []) | length) as $ndec
           | (if $t == null then null else $t.paths.worktree.path end) as $wt
+          | ((($t.current_state.detail // "")
+              | index("PR merged/closed")) != null) as $pr_landed
 
           # unreliable first: a contradiction taints every claim below it
           | ( if $t != null and $t.endpoint.exists == false and $src == "run-step"
@@ -211,6 +236,16 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
           # then the captain-owned reasons
           | ( if $ndec > 0 then "decision-waiting"
               elif $st == "blocked" then "blocked"
+              # A failure the crew could not recover from is captain-owned under
+              # AGENTS.md s9. Without this it falls through to the no-signal
+              # default in the quiet bucket and is never presented at all.
+              elif $st == "failed" then "failed"
+              # fm-crew-state.sh maps BOTH terminal run outcomes to state done and
+              # separates them only in detail: `passed` means the PR is already
+              # merged or closed, `checks-passed` means it is green and awaiting
+              # review. Without this branch a landed PR is presented as needing a
+              # merge the captain already gave.
+              elif $st == "done" and $pr_landed then "ready-to-stand-down"
               elif $st == "done" and ($t.pr.url // null) != null then "pr-ready"
               elif $st == "done" and $t.mode == "local-only" then "review-diff"
               elif $st == "done" and $t.kind == "scout"
@@ -286,7 +321,11 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
       today: $today,
       # Counts are flat top-level scalars, not a nested object: the shared TOON
       # encoder implements scalars and uniform-object arrays only (fm-toon-lib.sh).
-      count_walk: ($walk | length),
+      # Every count_* is over the FULL pre-limit set, so they never disagree about
+      # the population they describe. `shown` alone reflects --limit truncation,
+      # and walk[].pos runs 1..shown.
+      count_walk: ($walk_all | length),
+      shown: ($walk | length),
       count_captain: ($walk_all | map(select(.bucket == "captain")) | length),
       count_contradiction: ($walk_all | map(select(.tier == 0)) | length),
       count_bookkeeping: ($walk_all | map(select(.tier == 2)) | length),

@@ -16,11 +16,6 @@ set -u
 
 ROUNDS="$ROOT/bin/fm-rounds-queue.sh"
 TMP_ROOT=$(fm_test_tmproot fm-rounds)
-# fm_test_tmproot registers its EXIT-trap cleanup inside the command-substitution
-# subshell, so the directory is removed as that subshell exits. Existing suites
-# survive it only because they mkdir -p a subdirectory before every write; this
-# suite writes fixture files into the root directly, so recreate it explicitly.
-mkdir -p "$TMP_ROOT"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
@@ -46,14 +41,14 @@ run_rounds() {  # <json-file> [args...]
   FM_ROUNDS_SNAPSHOT="$stub" FM_ROUNDS_TODAY=2026-07-30 "$ROUNDS" --json "$@"
 }
 
-# task <id> <kind> <state> <source> <endpoint-exists> <ndecisions> [worktree] [mode] [pr] [report-present]
+# task <id> <kind> <state> <source> <endpoint-exists> <ndecisions> [worktree] [mode] [pr] [report-present] [detail]
 task() {
   local id=$1 kind=$2 st=$3 src=$4 ep=$5 nd=$6
-  local wt=${7:-/wt/$1} mode=${8:-no-mistakes} pr=${9:-null} rep=${10:-false}
+  local wt=${7:-/wt/$1} mode=${8:-no-mistakes} pr=${9:-null} rep=${10:-false} detail=${11:-d}
   local decs='[]'
   [ "$nd" -eq 0 ] || decs='[{"key":"default","verb":"needs-decision","summary":"pick A or B"}]'
   jq -n --arg id "$id" --arg kind "$kind" --arg st "$st" --arg src "$src" \
-        --arg wt "$wt" --arg mode "$mode" --argjson ep "$ep" \
+        --arg wt "$wt" --arg mode "$mode" --argjson ep "$ep" --arg detail "$detail" \
         --argjson decs "$decs" --argjson rep "$rep" \
         --argjson pr "$(if [ "$pr" = null ]; then echo null; else jq -n --arg p "$pr" '$p'; fi)" '
     { id:$id, kind:$kind, mode:$mode, harness:"claude", backend:"tmux",
@@ -63,7 +58,7 @@ task() {
               worktree:{path:$wt,present:true},
               home:{path:null,present:false},
               report:{path:"/r/report.md",present:$rep} },
-      current_state:{ state:$st, source:$src, detail:"d", raw:"r" },
+      current_state:{ state:$st, source:$src, detail:$detail, raw:"r" },
       endpoint:{ target:"s:w:p", exists:$ep, agent_alive:"not_checked" },
       pr:{ url:$pr, source:(if $pr==null then "absent" else "meta" end) },
       hints:{ pending_decision:(($decs|length)>0), blocked_event:false,
@@ -126,6 +121,29 @@ OUT=$(run_rounds "$SNAP")
 [ "$(jq -r '.count_held' <<<"$OUT")" = 0 ] || fail "arrived gate must not count as held"
 [ "$(why_of "$OUT" gated-now)" = gate-arrived ] || fail "arrived gate should surface"
 pass "a hold gate that has arrived surfaces instead of suppressing (inactive ON the date)"
+
+# An undated hold never expires, so it must never be able to bury a live problem.
+SNAP="$TMP_ROOT/hold-live.json"
+snapshot "$SNAP" \
+  "[$(task held-decision ship parked run-step true 1),
+    $(task held-blocked ship blocked pane true 0),
+    $(task held-failed ship failed pane true 0),
+    $(task held-quiet ship working pane true 0)]" \
+  "[$(row held-decision in_flight ship '' 'not now'),
+    $(row held-blocked in_flight ship '' 'not now'),
+    $(row held-failed in_flight ship '' 'not now'),
+    $(row held-quiet in_flight ship '' 'not now')]"
+OUT=$(run_rounds "$SNAP")
+
+[ "$(why_of "$OUT" held-decision)" = decision-waiting ] ||
+  fail "a hold must not hide a lane with an open captain decision"
+[ "$(why_of "$OUT" held-blocked)" = blocked ] || fail "a hold must not hide a blocked lane"
+[ "$(why_of "$OUT" held-failed)" = failed ] || fail "a hold must not hide a failed lane"
+[ "$(jq -r '[.walk[] | select(.id=="held-quiet")] | length' <<<"$OUT")" = 0 ] ||
+  fail "a held lane with no live problem stays dropped"
+[ "$(jq -r '.count_held' <<<"$OUT")" = 1 ] ||
+  fail "only the held lane with no live problem counts as held"
+pass "an active hold defers work but never suppresses a live decision, block, or failure"
 
 # --- contradiction detectors -------------------------------------------------
 
@@ -197,6 +215,22 @@ OUT=$(run_rounds "$SNAP")
 [ "$(why_of "$OUT" reap)" = ready-to-stand-down ] || fail "landed-but-running not surfaced"
 [ "$(jq -r '.count_captain' <<<"$OUT")" = 6 ] || fail "all six should be captain items"
 pass "all six captain-owned reasons classify correctly"
+
+# fm-crew-state.sh maps BOTH terminal run outcomes to state done and separates them
+# only in detail, so a PR the captain already merged must never be re-presented as
+# a PR needing a merge.
+SNAP="$TMP_ROOT/terminal.json"
+snapshot "$SNAP" \
+  "[$(task merged ship 'done' run-step true 0 /wt/merged no-mistakes https://x/pull/1 false 'run passed: PR merged/closed'),
+    $(task green ship 'done' run-step true 0 /wt/green no-mistakes https://x/pull/2 false 'checks green: PR ready for review')]" \
+  "[$(row merged in_flight ship), $(row green in_flight ship)]"
+OUT=$(run_rounds "$SNAP")
+
+[ "$(why_of "$OUT" merged)" = ready-to-stand-down ] ||
+  fail "a run reporting the PR merged/closed must never be presented as needing a merge"
+[ "$(why_of "$OUT" green)" = pr-ready ] ||
+  fail "checks green with the PR awaiting review is still pr-ready"
+pass "the two terminal run outcomes are told apart by detail, not collapsed into pr-ready"
 
 # --- quiet bucket ------------------------------------------------------------
 
@@ -282,9 +316,14 @@ pass "a shared workspace is reported once as a fleet fact, with affected lanes f
 # --- limit, parity, usage ----------------------------------------------------
 
 OUT=$(run_rounds "$TMP_ROOT/captain.json" --limit 2)
-[ "$(jq -r '.count_walk' <<<"$OUT")" = 2 ] || fail "--limit must bound the walk"
+[ "$(jq -r '.shown' <<<"$OUT")" = 2 ] || fail "--limit must bound the walk"
+[ "$(jq -r '.walk | length' <<<"$OUT")" = 2 ] || fail "shown must match the walk it describes"
+[ "$(jq -r '.count_walk' <<<"$OUT")" = 6 ] ||
+  fail "every count_* stays pre-limit, so there is one unambiguous total"
+[ "$(jq -r '.count_captain' <<<"$OUT")" = 6 ] ||
+  fail "count_captain and count_walk must describe the same population"
 assert_contains "$OUT" 'walk showing 2 of 6' "truncation must be disclosed, never silent"
-pass "--limit bounds the walk and discloses what it dropped"
+pass "--limit bounds the walk, and the counts stay one consistent pre-limit population"
 
 STUB=$(snapshot_stub "$TMP_ROOT/captain.json")
 TOON=$(FM_ROUNDS_SNAPSHOT="$STUB" FM_ROUNDS_TODAY=2026-07-30 "$ROUNDS")
