@@ -41,17 +41,19 @@ run_rounds() {  # <json-file> [args...]
   FM_ROUNDS_SNAPSHOT="$stub" FM_ROUNDS_TODAY=2026-07-30 "$ROUNDS" --json "$@"
 }
 
-# task <id> <kind> <state> <source> <endpoint-exists> <ndecisions> [worktree] [mode] [pr] [report-present] [detail]
+# task <id> <kind> <state> <source> <endpoint-exists> <ndecisions> [worktree] [mode] [pr] [report-present] [detail] [project]
 task() {
   local id=$1 kind=$2 st=$3 src=$4 ep=$5 nd=$6
   local wt=${7:-/wt/$1} mode=${8:-no-mistakes} pr=${9:-null} rep=${10:-false} detail=${11:-d}
+  local proj=${12:-demo}
   local decs='[]'
   [ "$nd" -eq 0 ] || decs='[{"key":"default","verb":"needs-decision","summary":"pick A or B"}]'
   jq -n --arg id "$id" --arg kind "$kind" --arg st "$st" --arg src "$src" \
         --arg wt "$wt" --arg mode "$mode" --argjson ep "$ep" --arg detail "$detail" \
+        --arg proj "$proj" \
         --argjson decs "$decs" --argjson rep "$rep" \
         --argjson pr "$(if [ "$pr" = null ]; then echo null; else jq -n --arg p "$pr" '$p'; fi)" '
-    { id:$id, kind:$kind, mode:$mode, harness:"claude", backend:"tmux",
+    { id:$id, kind:$kind, mode:$mode, project:$proj, harness:"claude", backend:"tmux",
       paths:{ meta:{path:"/m",present:true},
               status_log:{path:"/s",present:true,kind:"event_history",
                           last_event:{state:"working",note:"n",raw:"working: n"}},
@@ -122,6 +124,19 @@ OUT=$(run_rounds "$SNAP")
 [ "$(why_of "$OUT" gated-now)" = gate-arrived ] || fail "arrived gate should surface"
 pass "a hold gate that has arrived surfaces instead of suppressing (inactive ON the date)"
 
+# ...but only while nothing is working the item yet. `tasks-axi start` leaves the
+# hold tokens on the row, so an ungated arrived gate would re-present a running
+# item to the captain on every round for the rest of its life.
+SNAP="$TMP_ROOT/gate-live.json"
+snapshot "$SNAP" \
+  "[$(task gated-live ship working pane true 0)]" \
+  "[$(row gated-live in_flight ship '' 'wait for it' 2026-07-01)]"
+OUT=$(run_rounds "$SNAP")
+[ "$(jq -r '.count_walk' <<<"$OUT")" = 0 ] ||
+  fail "an expired gate on work already underway must not be asked about again"
+[ "$(jq -r '.count_quiet' <<<"$OUT")" = 1 ] || fail "the lane working it stays quiet"
+pass "an arrived gate stops being actionable once a lane is working the item"
+
 # An undated hold never expires, so it must never be able to bury a live problem.
 SNAP="$TMP_ROOT/hold-live.json"
 snapshot "$SNAP" \
@@ -149,10 +164,12 @@ pass "an active hold defers work but never suppresses a live decision, block, or
 
 SNAP="$TMP_ROOT/contra.json"
 snapshot "$SNAP" \
-  "[$(task dead-run ship parked run-step false 0),
+  "[$(task dead-run ship parked run-step false 0 /recycled/slot),
+    $(task occupant ship working pane true 0 /recycled/slot),
     $(task failed-landed ship failed run-step true 0),
     $(task paused-gone ship paused status-log false 0)]" \
   "[$(row dead-run in_flight ship),
+    $(row occupant in_flight ship),
     $(row failed-landed 'done' ship '' '' '' '' merged),
     $(row paused-gone in_flight ship)]"
 OUT=$(run_rounds "$SNAP")
@@ -167,11 +184,38 @@ done
 pass "every contradiction detector fires and lands in the unreliable bucket"
 
 # The regression that motivated dead-lane-run: a landed lane sharing a recycled
-# workspace slot inherits the live occupant's run-step, so a run-step reading on a
-# lane whose endpoint is gone must never be presented as that lane's state.
+# workspace slot inherits the live occupant's run-step, so that reading must never
+# be presented as the dead lane's state.
 [ "$(jq -r '.walk[0].id' <<<"$OUT")" = dead-run ] ||
   fail "contradictions must walk first"
-pass "a run-step attributed to a lane with no endpoint is refused as a state claim"
+pass "a run-step attributed to a lane whose slot a live lane now holds is refused"
+
+# The other direction: a run-step reading on a dead endpoint is the NORMAL state of
+# a crew that finished and then exited, so on its own it is not a contradiction.
+# Firing on that alone hid every finished lane's real reason behind "go check".
+SNAP="$TMP_ROOT/deadrun.json"
+snapshot "$SNAP" \
+  "[$(task exited-pr ship 'done' run-step false 0 /wt/exited-pr no-mistakes https://x/pull/9),
+    $(task exited-report scout 'done' run-step false 0 /wt/exited-report no-mistakes null true),
+    $(task exited-failed ship failed run-step false 0),
+    $(task exited-parked ship parked run-step false 0)]" \
+  "[$(row exited-pr in_flight ship), $(row exited-report in_flight scout),
+    $(row exited-failed in_flight ship), $(row exited-parked in_flight ship)]"
+OUT=$(run_rounds "$SNAP")
+
+[ "$(why_of "$OUT" exited-pr)" = pr-ready ] ||
+  fail "a lane that finished and exited on an unshared workspace keeps its real reason"
+[ "$(why_of "$OUT" exited-report)" = report-ready ] ||
+  fail "a finished scout that exited must still surface its report"
+[ "$(why_of "$OUT" exited-failed)" = failed ] ||
+  fail "a run that failed and exited is captain-owned, not a state to go check"
+# The exemption stops at a terminal outcome: a run still parked has no crew left
+# to answer its gate, so that reading really is a contradiction.
+[ "$(why_of "$OUT" exited-parked)" = dead-lane-run ] ||
+  fail "a parked run with no crew left to drive it stays unreliable"
+[ "$(jq -r '.count_contradiction' <<<"$OUT")" = 1 ] ||
+  fail "only the non-terminal run counts as a contradiction here"
+pass "dead-lane-run narrows to a live-claimed workspace or a non-terminal run, so finishing and exiting classifies normally"
 
 # --- bookkeeping drift, and the tier that keeps it below live decisions -------
 
@@ -184,6 +228,8 @@ snapshot "$SNAP" \
 OUT=$(run_rounds "$SNAP")
 
 [ "$(why_of "$OUT" orphan-lane)" = no-backlog-row ] || fail "lane with no row not detected"
+[ "$(jq -r '.walk[] | select(.id=="orphan-lane") | .repo' <<<"$OUT")" = demo ] ||
+  fail "the one finding with no row to read a project from must name it from the lane"
 [ "$(why_of "$OUT" ghost-row)" = no-lane ] || fail "row with no lane not detected"
 [ "$(jq -r '.count_bookkeeping' <<<"$OUT")" = 2 ] || fail "both should be severity bookkeeping"
 [ "$(pos_of "$OUT" needs-me)" -lt "$(pos_of "$OUT" orphan-lane)" ] ||
@@ -231,6 +277,12 @@ OUT=$(run_rounds "$SNAP")
 [ "$(why_of "$OUT" green)" = pr-ready ] ||
   fail "checks green with the PR awaiting review is still pr-ready"
 pass "the two terminal run outcomes are told apart by detail, not collapsed into pr-ready"
+
+# Neither lane here is quiet, so nothing may advertise a reveal flag with nothing
+# behind it - the same gate the held, landed, and truncation surfaces already use.
+[ "$(jq -r '.count_quiet' <<<"$OUT")" = 0 ] || fail "fixture should have no quiet lanes"
+assert_not_contains "$OUT" 'quiet lanes' "an empty quiet bucket must not be disclosed"
+pass "omitted[] only names surfaces that actually hold something"
 
 # --- quiet bucket ------------------------------------------------------------
 

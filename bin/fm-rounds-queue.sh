@@ -25,7 +25,10 @@
 #                        A hold is the captain's own recorded "not now"; re-asking is
 #                        the noise /rounds exists to remove. tasks-axi defines an
 #                        --until gate as inactive ON and after that date, so an
-#                        arrived gate is NOT a drop - it becomes a captain item.
+#                        arrived gate is NOT a drop - it becomes a captain item,
+#                        but only while the item has no lane yet. A dispatched
+#                        item keeps its expired gate until it is unheld, and
+#                        re-asking about work already underway is noise.
 #                        EXEMPT: a hold never suppresses a lane with a LIVE PROBLEM -
 #                        an open decision, or current_state blocked or failed. An
 #                        undated hold never expires, so without this a "not now" on a
@@ -41,10 +44,20 @@
 # line, never asked about), then `quiet` (silent unless --all).
 #
 # CONTRADICTION DETECTORS. Each exists because it fired on real fleet state:
-#   dead-lane-run    endpoint gone but current_state came from a run-step. A run
-#                    matched by branch inside a RECYCLED workspace slot gets
-#                    attributed to the wrong lane, so a landed lane can report the
-#                    live occupant's parked review verbatim.
+#   dead-lane-run    endpoint gone and current_state came from a run-step, AND
+#                    EITHER this lane's workspace is still claimed by a LIVE lane,
+#                    OR the run is not at a terminal outcome. A run is matched by
+#                    the branch at the workspace HEAD, so only a slot a live lane
+#                    now occupies can attribute that occupant's parked review to
+#                    this landed lane; and a run still working or parked has no
+#                    crew left to drive it whatever the workspace says. Neither
+#                    narrowing is optional: a terminal run-step reading on a dead
+#                    endpoint is the NORMAL state of a crew that finished and then
+#                    exited (fm-crew-state.sh reads the run-step deliberately
+#                    before any pane-liveness check), so firing on the dead
+#                    endpoint alone hid every finished lane's real reason -
+#                    pr-ready, ready-to-stand-down, report-ready - behind
+#                    "go check".
 #   failed-but-landed  current_state failed while the backlog records it merged.
 #   paused-but-gone  a declared pause on a lane whose workspace is gone: abandoned,
 #                    not waiting. Keying on the status log alone would skip this
@@ -151,16 +164,20 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
   | (reduce $rows[] as $r ({}; .[$r.id] = $r)) as $bmap
   | (reduce $tasks[] as $t ({}; .[$t.id] = $t)) as $tmap
 
-  # Workspace paths claimed by more than one lane whose endpoint is STILL ALIVE.
-  # Recycled pool slots mean a recorded path is not a unique lane identity, but a
-  # dead lane sharing a slot with a live one is not ambiguous - the live lane owns
-  # it, and the dead one is already caught by dead-lane-run or indeterminate.
-  # Requiring two live claimants keeps this detector rare and meaningful; without
-  # that filter it fired on 11 of 18 lanes and drowned the real work.
+  # Workspace paths a lane whose endpoint is STILL ALIVE currently claims.
+  # $live_wt is every such path: a DEAD lane recorded at one of them is sitting on
+  # a recycled slot a live lane now occupies, which is the only way a run matched
+  # by workspace-HEAD branch can be attributed to the wrong lane (dead-lane-run).
+  # $shared_wt is the subset TWO live lanes claim at once, which is the only way
+  # two lanes genuinely contend for one path. A dead lane sharing a slot with a
+  # live one is not that kind of conflict - the live lane owns it - so requiring
+  # two live claimants keeps workspace_ambiguous rare and meaningful; without that
+  # filter it fired on 11 of 18 lanes and drowned the real work.
   | ( $tasks
       | map(select(.endpoint.exists == true and .paths.worktree.path != null)
-            | .paths.worktree.path)
-      | group_by(.) | map(select(length > 1) | .[0]) ) as $shared_wt
+            | .paths.worktree.path) ) as $live_wt_all
+  | ($live_wt_all | unique) as $live_wt
+  | ($live_wt_all | group_by(.) | map(select(length > 1) | .[0])) as $shared_wt
 
   # ---- helpers ------------------------------------------------------------
   | def hold_active($b):
@@ -218,8 +235,15 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
           | ((($t.current_state.detail // "")
               | index("PR merged/closed")) != null) as $pr_landed
 
-          # unreliable first: a contradiction taints every claim below it
+          # unreliable first: a contradiction taints every claim below it.
+          # dead-lane-run needs one of its two narrowing conditions too: without
+          # them every crew that finished and exited reads as a contradiction and
+          # loses its real actionable reason. The exemption covers ONLY a run that
+          # reported a terminal outcome - a run still working or parked has no crew
+          # left to drive it, which is a contradiction whatever the workspace says.
           | ( if $t != null and $t.endpoint.exists == false and $src == "run-step"
+                 and (($wt != null and ($live_wt | index($wt)) != null)
+                      or ($st != "done" and $st != "failed"))
                 then "dead-lane-run"
               elif $t != null and $st == "failed" and landed($b)
                 then "failed-but-landed"
@@ -252,7 +276,12 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
                    and ($t.paths.report.present // false) then "report-ready"
               elif $st == "done" then "finished-unseen"
               elif $st == "paused" and landed($b) then "ready-to-stand-down"
-              elif gate_arrived($b) then "gate-arrived"
+              # An arrived gate is only actionable while nothing is working the
+              # item yet: `tasks-axi start` does NOT strip hold tokens, so a
+              # dispatched item keeps its expired gate until someone unholds it.
+              # Ungated, that expired gate would re-present a running item to the
+              # captain on every round for the rest of its life.
+              elif $t == null and gate_arrived($b) then "gate-arrived"
               else null end ) as $ask
 
           # then the quiet reasons, with the action /rounds takes silently
@@ -293,7 +322,13 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               priority_word: prio_word(prio($b) // 2),
               sort_priority: (prio($b) // 2),
               workspace_ambiguous: ($wt != null and ($shared_wt | index($wt)) != null),
-              repo: (if $b != null then $b.repo else null end),
+              # The project recorded on the lane itself backs repo up, because the
+              # one finding with no backlog row to read it from - no-backlog-row -
+              # is exactly the one whose handling needs a project name to render
+              # and a --repo value to file the missing row with.
+              repo: (if $b != null and $b.repo != null then $b.repo
+                     else (($t.project // "") | if . == "" then null else . end)
+                     end),
               kind: ($t.kind // (if $b != null then $b.kind else null end)),
               title: (if $b != null then $b.title else null end),
               state: $st,
@@ -351,7 +386,7 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
       dispatchable: [ $dispatchable[] | { id, repo, kind, priority_word, title } ],
       quiet: (if $all then [ $quiet_items[] | { id, why, action, state } ] else [] end),
       omitted: [
-        (if $all then empty
+        (if $all or ($quiet_items | length) == 0 then empty
          else {surface: "quiet lanes (\($quiet_items | length))", reveal: "--all"} end),
         (if $limit > 0 and ($walk_all | length) > $limit
          then {surface: "walk showing \($limit) of \($walk_all | length)",

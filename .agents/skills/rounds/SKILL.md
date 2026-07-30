@@ -99,10 +99,12 @@ This is what makes the walk survive an interruption, a context reset, and a rest
 | "That's urgent" / "that's low" | `tasks-axi update <id> --priority <n>` |
 | "Stand it down" | peek the endpoint for running processes FIRST, then `bin/fm-teardown.sh <id>` |
 | Missing backlog row | `tasks-axi add <id> "<title>" --kind <k> --repo <r> --start` |
+| Acts on a `gate-arrived` item | `tasks-axi unhold <id>` FIRST, then take the action they asked for |
 
 Never record a skip with no reason - that silently loses the item.
 Every recorded hold is visible in the backlog, but only a dated one comes back on its own: a `--until` hold stops suppressing the item on and after that date, and the item returns to the walk as `gate-arrived`.
 A hold recorded with no `--until` never expires, so it suppresses the item until someone lifts it by hand - which is why "Not now" gets a date.
+An arrived gate is not self-clearing either: dispatching the item leaves its hold tokens on the row, so `tasks-axi unhold <id>` is what actually closes a `gate-arrived` item.
 Either way a hold never hides a live problem: an item with an open decision, or one that goes blocked or failed, walks anyway.
 
 ## Surviving interruption
