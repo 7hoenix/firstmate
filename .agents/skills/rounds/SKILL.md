@@ -71,7 +71,8 @@ Then:     <what happens once they answer>
 - More than two findings, or a real tradeoff: replace the block with a `lavish-axi` board and one chat line pointing at it. The captain has a standing preference for rich review surfaces over chat summaries for anything with structure.
 - When `workspace_ambiguous` is true, add one line: the state reading for this one may be attributed to other work, and offer the check. Never drop the caveat silently.
 - When `drift` is set, the records disagree with reality on this item as well: add one line naming that gap and offer to close it, after the ask it was presented for.
-- When `blocked_by_open` is set, name what the item is still waiting on and never present it as ready to start.
+- When `blocked_by_open` is set, say that the item is still waiting on other work, and how many pieces of that work are still open, and never present it as ready to start.
+  Its values are machine-readable identifiers rather than captain-facing text, and the queue carries no title to translate them into, so never read them out.
 
 A `bucket: unreliable` item renders a DIFFERENT block, and never asserts a state:
 
@@ -85,7 +86,8 @@ I'd say:         <the specific check to run>
 Verify with `bin/fm-peek.sh <endpoint>`, `bin/fm-crew-state.sh <id>`, or `gh-axi pr view` for a merge question.
 `severity: contradiction` means a state claim is untrustworthy and is worth resolving before items that depend on state.
 `severity: bookkeeping` means the records drifted - real, but it poisons nothing, so keep it brief.
-Drift never takes this block away from an item that also needs the captain: that item stays a `bucket: captain` item and carries its gap in `drift`.
+Drift never takes this block away from a live piece of work that also needs the captain: that item stays a `bucket: captain` item and carries its gap in `drift`.
+Drift on work that is not actually running stays here, because there is nothing under way for an ask to be about until the records and reality agree.
 
 ## Recording the answer
 

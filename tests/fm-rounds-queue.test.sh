@@ -296,6 +296,25 @@ OUT=$(run_rounds "$SNAP")
   fail "a decision waiting on the captain must count as one"
 pass "bookkeeping drift yields the bucket to a captain reason and rides along as drift"
 
+# The other direction, and the boundary of that yield: with NO lane behind it the
+# only reachable captain reason is gate-arrived, so yielding there would ask the
+# captain to start work the records already claim is under way - while the drift
+# saying those records are wrong is what actually needs them.
+SNAP="$TMP_ROOT/mask-nolane.json"
+snapshot "$SNAP" "[]" \
+  "[$(row ghost-gate in_flight ship '' 'captain says wait' 2026-07-01)]"
+OUT=$(run_rounds "$SNAP")
+
+[ "$(bucket_of "$OUT" ghost-gate)" = unreliable ] ||
+  fail "an arrived gate with no lane must not be presented as ready to act on"
+[ "$(why_of "$OUT" ghost-gate)" = no-lane ] ||
+  fail "the drift must stay the presented reason when no lane stands behind the ask"
+[ "$(jq -r '.count_captain' <<<"$OUT")" = 0 ] ||
+  fail "a phantom must not count as an item waiting on the captain"
+[ "$(jq -r '.count_bookkeeping' <<<"$OUT")" = 1 ] ||
+  fail "it stays severity bookkeeping"
+pass "bookkeeping drift keeps the bucket when no live lane stands behind the captain reason"
+
 # A CONTRADICTION still preempts, unchanged: it makes the state claim itself
 # untrustworthy, so there is no reason left worth presenting.
 SNAP="$TMP_ROOT/mask-contra.json"

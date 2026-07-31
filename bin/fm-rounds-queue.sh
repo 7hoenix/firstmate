@@ -39,12 +39,17 @@
 #
 # BUCKETS. A CONTRADICTION-severity detector is tested BEFORE `captain`, because a
 # lane whose recorded state contradicts itself must never be presented as a state
-# claim - see the detectors below. A BOOKKEEPING-severity one is tested AFTER it:
-# drift poisons no state claim, so it must never MASK a decision waiting on the
-# captain either. When both hold, the captain reason wins the bucket and the drift
-# rides along on the row as `drift` rather than being discarded.
-# So the order is `unreliable` on a contradiction, then `captain` (present one at a
-# time), then `unreliable` on drift alone, then
+# claim - see the detectors below. A BOOKKEEPING-severity one is tested AFTER it,
+# but ONLY when a live lane stands behind the captain reason: drift poisons no
+# state claim, so it must never MASK a decision a running crew is waiting on, and
+# then the captain reason wins the bucket while the drift rides along on the row as
+# `drift` rather than being discarded. With NO lane there is nothing for a captain
+# reason to be about - the only one reachable there is `gate-arrived`, and `no-lane`
+# says the row's own claim to be underway is already wrong - so the drift stays the
+# presented reason and the item is never offered as ready to act on.
+# So the order is `unreliable` on a contradiction, then `unreliable` on drift with
+# no lane behind it, then `captain` (present one at a time), then `unreliable` on
+# drift alone, then
 # `dispatchable` (reported as ONE batched confirm line the captain answers), then
 # `quiet` (silent unless --all). `dispatchable` proves only that no blocker is
 # open on the row; it does NOT prove the item is free of the same-files/same-
@@ -100,7 +105,10 @@
 # one dispatches the item, so it is not offered while any blocker is still open.
 # Every walk row carries its still-open blockers in `blocked_by_open`, so no
 # classification path can present an undispatchable item with nothing for the
-# presenter to caveat it with.
+# presenter to caveat it with. Those are machine-readable task identifiers, not
+# captain-facing text: nothing here resolves a blocker to a title, and AGENTS.md s9
+# keeps ids out of captain chat, so the field supports the caveat and its count
+# rather than a name to read out.
 #
 # PRIORITY. Read from the backlog row's tasks-axi priority field (0-4, 0 highest);
 # there is no second store. Unset sorts as 2 (medium) and is flagged priority_set
@@ -303,10 +311,12 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
 
           # Bookkeeping drift is kept SEPARATE from the contradictions above,
           # because it is evaluated after the captain-owned reasons rather than
-          # before them: a lane whose row is missing is still a lane whose open
-          # decision is waiting on the captain, and burying that decision in a
+          # before them: a LIVE lane whose row is missing is still a lane whose
+          # open decision is waiting on the captain, and burying that decision in a
           # "state unclear" block - which has no slot for the decision or the PR -
-          # is the one failure /rounds exists to prevent.
+          # is the one failure /rounds exists to prevent. That yield is scoped to a
+          # live lane; see $book_first below for why drift with no lane keeps the
+          # bucket.
           | ( if $t != null and $b == null
                 then "no-backlog-row"
               elif $t == null and $b != null and $b.state == "in_flight"
@@ -369,7 +379,15 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               elif $b != null and $b.state == "queued" then ["dispatchable", "dispatch"]
               else ["no-signal", "none"] end ) as $quiet
 
+          # Drift only yields to a captain reason when a LIVE lane stands behind
+          # it. With no lane the sole reachable captain reason is `gate-arrived`,
+          # and offering it would ask the captain to start work the records already
+          # claim is under way - a phantom, on top of the very drift that says the
+          # records are wrong. The honest reading is the drift, so it keeps the
+          # bucket and the presented reason here.
+          | ($book != null and $t == null) as $book_first
           | ( if $contra != null then "unreliable"
+              elif $book_first then "unreliable"
               elif $ask != null then "captain"
               elif $book != null then "unreliable"
               elif $quiet[0] == "dispatchable" then "dispatchable"
@@ -391,7 +409,8 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               tier: $tier,
               severity: (if $tier == 0 then "contradiction"
                          elif $tier == 2 then "bookkeeping" else "-" end),
-              why: ($contra // $ask // $book // $quiet[0]),
+              why: ($contra // (if $book_first then $book else $ask end)
+                    // $book // $quiet[0]),
               # The bookkeeping fact, carried rather than discarded: when a
               # captain reason takes the bucket, this is the only place the drift
               # survives, and the presenter still owes it a line.
