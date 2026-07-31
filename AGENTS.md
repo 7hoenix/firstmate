@@ -678,10 +678,11 @@ Update the backlog on every dispatch, completion, and decision for a work item.
 
 ```markdown
 ## In flight
-- [ ] <id> - <one line> (repo: <name>, since <date>)
+- [ ] <id> - <one line> (repo: <name>, since <date>) (priority: <0-4>)
 
 ## Queued
-- [ ] <id> - <one line> (repo: <name>) blocked-by: <id> - <reason>
+- [ ] <id> - <one line> (repo: <name>) (priority: <0-4>) blocked-by: <id> - <reason>
+- [ ] <id> - <one line> (repo: <name>) (priority: <0-4>) (hold: <reason>) (hold-kind: captain) (hold-until: <date>)
 
 ## Done
 - [x] <id> - <one line> - <https://github.com/owner/repo/pull/number> (merged <date>)
@@ -707,13 +708,17 @@ When hand-editing, prune older Done entries manually whenever you add to the sec
 Pruning loses nothing: finished PR-based ship tasks live on as GitHub PRs, local-only ship tasks live on in local `main`, and scout tasks live on as report files.
 Map firstmate's real backlog operations to the approved commands:
 
-- File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
+- File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name> --priority <0-4>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
+  Priority is the captain's ranking and the backlog is its only store: 0 urgent, 1 high, 2 medium (the default reading when unset), 3 low, 4 someday.
+  Set it at dispatch, or later with `tasks-axi update <id> --priority <n>`; speak the word to the captain, never the number.
 - Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that blockers are gone and any time/date gate has arrived.
 - Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
 - Update task notes: inspect first with `tasks-axi show <id> --full`, then replace the considered body with `tasks-axi update <id> --body-file <path>`.
   Add `--archive-body` to that update command when superseding prior state should remain recoverable.
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.
   This is a dependency check only; future-dated items still stay queued until their date arrives.
+- Defer an item the captain does not want raised yet: `tasks-axi hold <id> --reason "<reason>" [--kind captain|external|load|parked|future] [--until <YYYY-MM-DD>]`, and `tasks-axi unhold <id>` to lift it.
+  Only an `--until` hold is a date gate that stops suppressing the item on and after that date; an undated hold suppresses it until someone lifts it by hand, and the tokens stay on the row through dispatch either way.
 - Read an item's full notes: `tasks-axi show <id> --full`.
 - Hand a task off to a secondmate home: load `secondmate-provisioning`, then keep using `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`; do not call bare `tasks-axi mv` for this path, because the helper resolves and validates the secondmate home before moving anything.
 - Normalize the file: `tasks-axi render` rewrites every id'd task in canonical form and leaves free-form lines untouched.

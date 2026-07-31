@@ -48,6 +48,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+# shellcheck source=bin/fm-toon-lib.sh
+. "$SCRIPT_DIR/fm-toon-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -359,37 +361,8 @@ if [ "$FORMAT" = json ]; then
 fi
 
 # --- TOON renderer (output boundary; parity with the JSON model) ------------
-# The model is a flat object of scalar fields plus arrays of uniform scalar
-# objects, so the encoder only needs object scalars, the tabular array form
-# (key[N]{fields}: + comma rows at +2 indent), and the empty-array form (key: []),
-# per the TOON spec. Quoting follows the spec exactly.
-TOON=$(printf '%s\n' "$MODEL" | jq -r '
-  def q:
-    tostring
-    | if (. == "")
-        or test("^\\s|\\s$")
-        or (. == "true" or . == "false" or . == "null")
-        or test("^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$")
-        or test("[:\"\\\\\\[\\]{},]")
-        or test("[[:cntrl:]]")
-        or test("^-")
-      then "\"" + (gsub("\\\\"; "\\\\") | gsub("\""; "\\\"") | gsub("\n"; "\\n") | gsub("\r"; "\\r") | gsub("\t"; "\\t")) + "\""
-      else . end;
-  def scal:
-    if . == null then "null"
-    elif type == "boolean" then (if . then "true" else "false" end)
-    elif type == "number" then tostring
-    else q end;
-  def emit($k; $v):
-    if ($v | type) == "array" then
-      if ($v | length) == 0 then "\($k): []"
-      else
-        ($v[0] | keys_unsorted) as $ks
-        | ( "\($k)[\($v | length)]{\($ks | map(q) | join(","))}:",
-            ($v[] as $row | "  " + ([ $ks[] as $kk | ($row[$kk] | scal) ] | join(","))) )
-      end
-    else "\($k): " + ($v | scal)
-    end;
-  [ to_entries[] | emit(.key; .value) ] | join("\n")
-') || { echo "fm-bearings-snapshot: TOON rendering failed" >&2; exit 1; }
+# The encoder itself lives in bin/fm-toon-lib.sh, shared with bin/fm-rounds-queue.sh
+# so the TOON quoting rules have exactly one owner.
+TOON=$(printf '%s\n' "$MODEL" | fm_toon_encode) ||
+  { echo "fm-bearings-snapshot: TOON rendering failed" >&2; exit 1; }
 printf '%s\n' "$TOON"
