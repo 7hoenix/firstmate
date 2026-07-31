@@ -45,6 +45,10 @@
 # open on the row; it does NOT prove the item is free of the same-files/same-
 # subsystem overlap AGENTS.md s7 also calls blocked, so /rounds proposes that
 # batch and never starts it on its own.
+# Every quiet row carries an `action` label naming what it waits on. That label is
+# DESCRIPTIVE ONLY and authorizes nothing: no consumer may act on an item the
+# captain was never shown. See the quiet-reason block below for why a blanket
+# pause-ack in particular would retire a supervision safety net.
 #
 # CONTRADICTION DETECTORS. Each exists because it fired on real fleet state:
 #   dead-lane-run    endpoint gone and current_state came from a run-step, AND
@@ -316,7 +320,15 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               elif $t == null and gate_arrived($b) then "gate-arrived"
               else null end ) as $ask
 
-          # then the quiet reasons, with the action /rounds takes silently
+          # then the quiet reasons, each paired with a DESCRIPTIVE label for what
+          # the item is waiting on. That label is NOT an instruction: nothing here
+          # authorizes acting on an item the captain was never shown, and the
+          # rule 7 of the /rounds skill forbids it. Acknowledging a declared wait resets
+          # the pause window and clears the throttle that eventually forces a
+          # forgotten wait back to the supervisor, so a blanket ack across every
+          # paused lane on every walk would retire that safety net; AGENTS.md s8
+          # scopes that ack to a confirmed recheck, which the skill reaches only
+          # through a presented item answered by the captain.
           | ( if $st == "working" then ["progressing", "none"]
               elif $st == "parked" and $ndec == 0 then ["parked-on-itself", "steer"]
               elif $st == "paused" then ["declared-wait", "pause-ack"]

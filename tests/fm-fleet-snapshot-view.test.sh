@@ -266,6 +266,8 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
 - [ ] multi-blocked - Multi Blocked (repo: beta) (kind: ship) blocked-by: queued-comma blocked-by: parenthetical-title
+- [ ] held-comma-reason - Held Comma Reason (repo: beta) (kind: ship) (hold: waiting on vendor, then retry) (hold-kind: external) (hold-until: 2026-08-05)
+- [ ] held-undated - Held Undated (repo: beta) (kind: ship) (hold: captain decision pending) (hold-kind: captain)
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
@@ -371,7 +373,32 @@ EOF
     "view should render bracketed PR artifact outside the title"
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
+  # Hold tokens feed the /rounds active-hold drop and gate-arrived classification,
+  # so both brittle details of their capture are pinned here: the reason runs to the
+  # closing paren (a comma inside it must survive), and the alternation must not let
+  # the plain `hold` key swallow a `hold-kind` token.
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "held-comma-reason")
+    | .hold == "waiting on vendor, then retry"
+      and .hold_kind == "external"
+      and .hold_until == "2026-08-05"
+      and .title == "Held Comma Reason"
+  ' >/dev/null || fail "a comma-bearing hold reason did not survive capture"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "held-undated")
+    | .hold == "captain decision pending"
+      and .hold_kind == "captain"
+      and .hold_until == null
+      and .title == "Held Undated"
+  ' >/dev/null || fail "an undated hold did not parse with a null hold_until"
+  printf '%s' "$out" | jq -e '
+    [.backlog.records[] | select(.hold != null)] | length == 2
+  ' >/dev/null || fail "hold capture leaked onto unheld rows"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "blocked-reason") | .hold == null and .hold_until == null
+  ' >/dev/null || fail "an unheld row should carry null hold fields"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
+  pass "hold tokens parse with a comma-bearing reason, an undated form, and a clean title"
 }
 
 test_view_renders_snapshot() {
