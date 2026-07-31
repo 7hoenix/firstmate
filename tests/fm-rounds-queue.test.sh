@@ -144,6 +144,38 @@ OUT=$(run_rounds "$SNAP")
 [ "$(jq -r '.count_quiet' <<<"$OUT")" = 1 ] || fail "the lane working it stays quiet"
 pass "an arrived gate stops being actionable once a lane is working the item"
 
+# ...and it is not actionable while a dependency is still open either: acting on a
+# gate-arrived item unholds and dispatches it, which is the same "work on an unmet
+# dependency" the dispatchable batch already refuses.
+SNAP="$TMP_ROOT/gate-blocked.json"
+snapshot "$SNAP" "[]" \
+  "[$(row gate-blocker queued ship),
+    $(row gate-waiting queued ship '' 'wait for it' 2026-07-01 gate-blocker)]"
+OUT=$(run_rounds "$SNAP" --all)
+[ "$(jq -r '[.walk[] | select(.id=="gate-waiting")] | length' <<<"$OUT")" = 0 ] ||
+  fail "an arrived gate whose blocker is still open must not be presented as actionable"
+[ "$(jq -r '.quiet[] | select(.id=="gate-waiting") | .why' <<<"$OUT")" = waiting-on-another ] ||
+  fail "it stays quiet as waiting-on-another until its blocker clears"
+pass "an arrived gate is not offered while any blocker is still open"
+
+# Once the blockers have cleared, the same gate surfaces - and the walk row carries
+# its blockers, so no classification path can present an undispatchable item with
+# nothing for the presenter to caveat it with.
+SNAP="$TMP_ROOT/gate-cleared.json"
+snapshot "$SNAP" \
+  "[$(task blocked-decision ship parked run-step true 1)]" \
+  "[$(row gate-cleared queued ship '' 'wait for it' 2026-07-01 landed-blocker),
+    $(row open-dep queued ship),
+    $(row blocked-decision in_flight ship '' '' '' open-dep)]"
+OUT=$(run_rounds "$SNAP")
+[ "$(why_of "$OUT" gate-cleared)" = gate-arrived ] ||
+  fail "an arrived gate whose blockers have all cleared must surface"
+[ "$(jq -r '.walk[] | select(.id=="gate-cleared") | .blocked_by_open' <<<"$OUT")" = null ] ||
+  fail "a cleared blocker must not be reported as still open"
+[ "$(jq -r '.walk[] | select(.id=="blocked-decision") | .blocked_by_open' <<<"$OUT")" = open-dep ] ||
+  fail "the walk row must carry the blockers that are still open"
+pass "a cleared gate surfaces, and every walk row carries its still-open blockers"
+
 # An undated hold never expires, so it must never be able to bury a live problem.
 SNAP="$TMP_ROOT/hold-live.json"
 snapshot "$SNAP" \
@@ -244,6 +276,38 @@ OUT=$(run_rounds "$SNAP")
 [ "$(pos_of "$OUT" needs-me)" -lt "$(pos_of "$OUT" ghost-row)" ] ||
   fail "a live decision must outrank bookkeeping drift"
 pass "bookkeeping drift is surfaced but never outranks a decision waiting on the captain"
+
+# ...and it must not MASK one either. The unreliable block has no slot for a
+# decision or a PR, so a lane whose row went missing would have its open decision
+# rendered as "state unclear" and never asked. Bookkeeping yields the bucket; the
+# drift rides along instead of being discarded.
+SNAP="$TMP_ROOT/mask.json"
+snapshot "$SNAP" \
+  "[$(task decides-no-row ship parked run-step true 1)]" "[]"
+OUT=$(run_rounds "$SNAP")
+
+[ "$(bucket_of "$OUT" decides-no-row)" = captain ] ||
+  fail "a missing backlog row must not bury the decision waiting on the captain"
+[ "$(why_of "$OUT" decides-no-row)" = decision-waiting ] ||
+  fail "the captain-owned reason must be the presented one"
+[ "$(jq -r '.walk[] | select(.id=="decides-no-row") | .drift' <<<"$OUT")" = no-backlog-row ] ||
+  fail "the bookkeeping fact must be carried, not discarded"
+[ "$(jq -r '.count_captain' <<<"$OUT")" = 1 ] ||
+  fail "a decision waiting on the captain must count as one"
+pass "bookkeeping drift yields the bucket to a captain reason and rides along as drift"
+
+# A CONTRADICTION still preempts, unchanged: it makes the state claim itself
+# untrustworthy, so there is no reason left worth presenting.
+SNAP="$TMP_ROOT/mask-contra.json"
+snapshot "$SNAP" \
+  "[$(task dec-dead ship parked run-step false 1 /recycled/slot),
+    $(task slot-owner ship working pane true 0 /recycled/slot)]" \
+  "[$(row dec-dead in_flight ship), $(row slot-owner in_flight ship)]"
+OUT=$(run_rounds "$SNAP")
+[ "$(bucket_of "$OUT" dec-dead)" = unreliable ] ||
+  fail "a contradiction must still preempt the captain reason"
+[ "$(why_of "$OUT" dec-dead)" = dead-lane-run ] || fail "the contradiction must be the presented reason"
+pass "contradiction severity keeps preempting a captain reason"
 
 # --- captain-owned reasons ---------------------------------------------------
 
@@ -416,6 +480,20 @@ OUT=$(run_rounds "$SNAP")
 [ "$(jq -r '.walk[] | select(.id=="p-bogus") | .priority_set' <<<"$OUT")" = false ] ||
   fail "an out-of-range priority must be flagged so the presenter can offer to correct it"
 pass "an out-of-range priority reads as unset in word, sort, and flag alike"
+
+# A non-integer is reachable the same way and must read as unset the same way:
+# 2.5 would otherwise say medium, sort between medium and low, and suppress the
+# offer to correct it - the three disagreeing at once.
+SNAP="$TMP_ROOT/prio-fraction.json"
+snapshot "$SNAP" \
+  "[$(task p-fraction ship blocked pane true 0)]" \
+  "[$(row p-fraction in_flight ship 2.5)]"
+OUT=$(run_rounds "$SNAP")
+[ "$(jq -r '.walk[] | select(.id=="p-fraction") | .priority_set' <<<"$OUT")" = false ] ||
+  fail "a non-integer priority must read as unset"
+[ "$(jq -r '.walk[] | select(.id=="p-fraction") | .priority_word' <<<"$OUT")" = medium ] ||
+  fail "a non-integer priority must present as medium"
+pass "a non-integer priority reads as unset, closing the last gap in the invariant"
 
 # --- workspace conflicts are one fleet fact, not N items ---------------------
 

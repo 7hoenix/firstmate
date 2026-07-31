@@ -37,9 +37,14 @@
 #                        crew stuck waiting on them. A held row with no such live
 #                        signal is dropped exactly as before.
 #
-# BUCKETS. `unreliable` is tested BEFORE `captain`, because a lane whose recorded
-# state contradicts itself must never be presented as a state claim - see the
-# contradiction detectors below. Then `captain` (present one at a time), then
+# BUCKETS. A CONTRADICTION-severity detector is tested BEFORE `captain`, because a
+# lane whose recorded state contradicts itself must never be presented as a state
+# claim - see the detectors below. A BOOKKEEPING-severity one is tested AFTER it:
+# drift poisons no state claim, so it must never MASK a decision waiting on the
+# captain either. When both hold, the captain reason wins the bucket and the drift
+# rides along on the row as `drift` rather than being discarded.
+# So the order is `unreliable` on a contradiction, then `captain` (present one at a
+# time), then `unreliable` on drift alone, then
 # `dispatchable` (reported as ONE batched confirm line the captain answers), then
 # `quiet` (silent unless --all). `dispatchable` proves only that no blocker is
 # open on the row; it does NOT prove the item is free of the same-files/same-
@@ -73,8 +78,8 @@
 #   no-lane          recorded in flight with nothing running.
 #   indeterminate    current_state unknown with no source at all.
 # The first three are severity `contradiction` and walk first; the last three are
-# `bookkeeping` - real drift, but it poisons no state claim, so it must never
-# outrank a live decision waiting on the captain.
+# `bookkeeping` - real drift, but it poisons no state claim, so it must neither
+# outrank nor mask a live decision waiting on the captain.
 #
 # A shared workspace is deliberately NOT a per-lane detector. Two live lanes
 # claiming one path is ONE fleet-level fact, so it is reported once in conflicts[]
@@ -91,12 +96,18 @@
 # whose array is missing or unreadable counts as blocked too: a false "still
 # blocked" costs one deferred dispatch, a false "dispatchable" offers work on an
 # unmet dependency.
+# An arrived hold gate answers to the same rule and for the same reason: acting on
+# one dispatches the item, so it is not offered while any blocker is still open.
+# Every walk row carries its still-open blockers in `blocked_by_open`, so no
+# classification path can present an undispatchable item with nothing for the
+# presenter to caveat it with.
 #
 # PRIORITY. Read from the backlog row's tasks-axi priority field (0-4, 0 highest);
 # there is no second store. Unset sorts as 2 (medium) and is flagged priority_set
 # false so the presenter can offer to set it rather than bury the item. A value
-# outside 0-4 - reachable because a hand-edited backlog has no validator - reads as
-# unset, so the word, the sort, and the offer-to-set flag can never disagree.
+# outside 0-4, or a non-integer - both reachable because a hand-edited backlog has
+# no validator - reads as unset, so the word, the sort, and the offer-to-set flag
+# can never disagree.
 #
 # SORT: priority ascending first, then tier - contradiction-severity items ahead of
 # captain items, bookkeeping-severity items after them - then oldest first, then id.
@@ -221,7 +232,7 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
     def prio($b):
       if $b == null or $b.priority == null then null
       else ($b.priority | tonumber? // null)
-           | if . != null and (. < 0 or . > 4) then null else . end
+           | if . != null and (. < 0 or . > 4 or (. | floor) != .) then null else . end
       end;
     def prio_word($p):
       if $p == 0 then "urgent" elif $p == 1 then "high" elif $p == 2 then "medium"
@@ -238,6 +249,14 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
     def blocker_open($b):
       blockers_unreadable($b)
       or (blockers($b) | any(. as $bid | ($open_ids | index($bid)) != null));
+    # The blockers still standing behind an item, for the presenter to caveat with.
+    # Non-empty exactly when blocker_open is true, so the row can never say "clear"
+    # while the classification says blocked: an unreadable array names the one token
+    # the row does carry rather than rendering the item as unblocked.
+    def open_blockers($b):
+      if blockers_unreadable($b) then [$b.blocked_by]
+      else [ blockers($b)[] | . as $bid | select(($open_ids | index($bid)) != null) ]
+      end;
 
   # ---- the union set ------------------------------------------------------
     ((($tasks | map(.id)) + ($open | map(.id))) | unique) as $ids
@@ -280,13 +299,21 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
                 then "failed-but-landed"
               elif $t != null and $st == "paused" and $t.endpoint.exists == false
                 then "paused-but-gone"
-              elif $t != null and $b == null
+              else null end ) as $contra
+
+          # Bookkeeping drift is kept SEPARATE from the contradictions above,
+          # because it is evaluated after the captain-owned reasons rather than
+          # before them: a lane whose row is missing is still a lane whose open
+          # decision is waiting on the captain, and burying that decision in a
+          # "state unclear" block - which has no slot for the decision or the PR -
+          # is the one failure /rounds exists to prevent.
+          | ( if $t != null and $b == null
                 then "no-backlog-row"
               elif $t == null and $b != null and $b.state == "in_flight"
                 then "no-lane"
               elif $t != null and $st == "unknown" and $src == "none"
                 then "indeterminate"
-              else null end ) as $bad
+              else null end ) as $book
 
           # then the captain-owned reasons
           | ( if $ndec > 0 then "decision-waiting"
@@ -317,7 +344,12 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               # dispatched item keeps its expired gate until someone unholds it.
               # Ungated, that expired gate would re-present a running item to the
               # captain on every round for the rest of its life.
-              elif $t == null and gate_arrived($b) then "gate-arrived"
+              # It is also only actionable once every blocker has cleared: acting
+              # on one unholds and dispatches the item, so offering it while a
+              # dependency is still open starts work on an unmet dependency
+              # through the door the dispatchable batch already closed.
+              elif $t == null and gate_arrived($b) and (blocker_open($b) | not)
+                then "gate-arrived"
               else null end ) as $ask
 
           # then the quiet reasons, each paired with a DESCRIPTIVE label for what
@@ -337,8 +369,9 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               elif $b != null and $b.state == "queued" then ["dispatchable", "dispatch"]
               else ["no-signal", "none"] end ) as $quiet
 
-          | ( if $bad != null then "unreliable"
+          | ( if $contra != null then "unreliable"
               elif $ask != null then "captain"
+              elif $book != null then "unreliable"
               elif $quiet[0] == "dispatchable" then "dispatchable"
               else "quiet" end ) as $bucket
 
@@ -346,12 +379,11 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
           # claim untrustworthy, so it is worth resolving before anything that
           # depends on state - it walks first. BOOKKEEPING drift (a row with no
           # lane, a lane with no row) is real and worth surfacing, but it poisons
-          # nothing, so it must not outrank a live decision waiting on the captain.
-          | ( if $bad == "dead-lane-run" or $bad == "failed-but-landed"
-                 or $bad == "paused-but-gone"
-                then 0
+          # nothing, so it must neither outrank nor mask a live decision waiting on
+          # the captain - hence the bucket order above and this tier below it.
+          | ( if $contra != null then 0
               elif $bucket == "captain" then 1
-              elif $bad != null then 2
+              elif $book != null then 2
               else 3 end ) as $tier
 
           | { id: $m.id,
@@ -359,7 +391,11 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               tier: $tier,
               severity: (if $tier == 0 then "contradiction"
                          elif $tier == 2 then "bookkeeping" else "-" end),
-              why: ($bad // $ask // $quiet[0]),
+              why: ($contra // $ask // $book // $quiet[0]),
+              # The bookkeeping fact, carried rather than discarded: when a
+              # captain reason takes the bucket, this is the only place the drift
+              # survives, and the presenter still owes it a line.
+              drift: $book,
               action: (if $bucket == "quiet" then $quiet[1] else "ask" end),
               priority: prio($b),
               priority_set: (prio($b) != null),
@@ -378,6 +414,8 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
               state: $st,
               source: $src,
               since: (if $b != null then $b.since else null end),
+              blocked_by_open: (open_blockers($b) | join(" ")
+                                | if . == "" then null else . end),
               decisions: $ndec,
               pr: ($t.pr.url // (if $b != null then $b.pr_url else null end)),
               report: (if $t != null and ($t.paths.report.present // false)
@@ -415,9 +453,10 @@ MODEL=$(printf '%s\n' "$SNAP" | jq \
       count_secondmate: ($d_sub | length),
       count_conflicts: ($shared_wt | length),
       walk: [ $walk | to_entries[]
-              | { pos: (.key + 1) } + (.value | { id, bucket, severity, why,
+              | { pos: (.key + 1) } + (.value | { id, bucket, severity, why, drift,
                     priority_word, priority_set, workspace_ambiguous, repo, kind,
-                    state, source, decisions, pr, report, since, title, detail }) ],
+                    state, source, decisions, blocked_by_open, pr, report, since,
+                    title, detail }) ],
       # A shared workspace is one fleet-level fact, not N separate walk items:
       # reported once here, with every affected lane flagged workspace_ambiguous so
       # the presenter caveats its state rather than repeating the finding per lane.

@@ -70,6 +70,8 @@ Then:     <what happens once they answer>
 - `I'd say:` is mandatory. Presenting options without a recommendation moves work onto the captain instead of off.
 - More than two findings, or a real tradeoff: replace the block with a `lavish-axi` board and one chat line pointing at it. The captain has a standing preference for rich review surfaces over chat summaries for anything with structure.
 - When `workspace_ambiguous` is true, add one line: the state reading for this one may be attributed to other work, and offer the check. Never drop the caveat silently.
+- When `drift` is set, the records disagree with reality on this item as well: add one line naming that gap and offer to close it, after the ask it was presented for.
+- When `blocked_by_open` is set, name what the item is still waiting on and never present it as ready to start.
 
 A `bucket: unreliable` item renders a DIFFERENT block, and never asserts a state:
 
@@ -83,6 +85,7 @@ I'd say:         <the specific check to run>
 Verify with `bin/fm-peek.sh <endpoint>`, `bin/fm-crew-state.sh <id>`, or `gh-axi pr view` for a merge question.
 `severity: contradiction` means a state claim is untrustworthy and is worth resolving before items that depend on state.
 `severity: bookkeeping` means the records drifted - real, but it poisons nothing, so keep it brief.
+Drift never takes this block away from an item that also needs the captain: that item stays a `bucket: captain` item and carries its gap in `drift`.
 
 ## Recording the answer
 
