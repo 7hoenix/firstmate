@@ -717,6 +717,8 @@ Map firstmate's real backlog operations to the approved commands:
   Add `--archive-body` to that update command when superseding prior state should remain recoverable.
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.
   This is a dependency check only; future-dated items still stay queued until their date arrives.
+- Defer an item the captain does not want raised yet: `tasks-axi hold <id> --reason "<reason>" [--kind captain|external|load|parked|future] [--until <YYYY-MM-DD>]`, and `tasks-axi unhold <id>` to lift it.
+  Only an `--until` hold is a date gate that stops suppressing the item on and after that date; an undated hold suppresses it until someone lifts it by hand, and the tokens stay on the row through dispatch either way.
 - Read an item's full notes: `tasks-axi show <id> --full`.
 - Hand a task off to a secondmate home: load `secondmate-provisioning`, then keep using `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`; do not call bare `tasks-axi mv` for this path, because the helper resolves and validates the secondmate home before moving anything.
 - Normalize the file: `tasks-axi render` rewrites every id'd task in canonical form and leaves free-form lines untouched.
