@@ -51,7 +51,9 @@
 # child work, kills child runtime endpoints, and removes the retired home. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
-# leased home and state in place instead of hiding a still-held lease.
+# leased home and state in place instead of hiding a still-held lease - including
+# the worktree-scoped commit-signing disable, which is put back whenever a return
+# does not succeed so a still-live agent is never handed back an interactive signer.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -670,7 +672,23 @@ cleanup_stale_lock_for_safety_check() {
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
+#
+# The task's worktree-scoped signing disable is cleared BEFORE the return, while
+# teardown still owns the slot: clearing it after a successful return would race a
+# concurrent lease that had already taken the slot and written its own override.
+# Do not "simplify" this into clearing after the return. The price of that
+# ordering is that a refused return leaves a still-live worktree without its
+# disable, so every non-success path restores it here. The restore is best-effort:
+# it never changes this function's exit code and never replaces the return's own
+# failure diagnostics.
 teardown_treehouse_return() {
+  local dir=$1 rc=0
+  teardown_treehouse_return_slot "$@" || rc=$?
+  [ "$rc" -eq 0 ] || restore_worktree_commit_signing_override "$dir"
+  return "$rc"
+}
+
+teardown_treehouse_return_slot() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
 

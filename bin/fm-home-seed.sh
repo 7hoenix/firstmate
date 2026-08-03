@@ -586,8 +586,12 @@ seed_return_treehouse_home() {
   fi
   # The slot goes back into the firstmate repo's own pool for reuse, so drop any
   # worktree-scoped signing disable with it. Best-effort; never blocks the return.
+  # Cleared before the return, while we still own the slot: clearing afterwards
+  # would race a concurrent lease's own fresh override. A return that fails leaves
+  # the home in place, so the disable goes back with it.
   clear_worktree_commit_signing_override "$abs_home"
   ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+    restore_worktree_commit_signing_override "$abs_home"
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }

@@ -48,6 +48,12 @@
 #     explicitly (clear_worktree_commit_signing_override, called from
 #     bin/fm-teardown.sh's return path and bin/fm-home-seed.sh's rollback) before
 #     the slot goes back. A recycled slot carries no override, so nothing leaks.
+#     The clear must happen BEFORE the return, while the caller still owns the
+#     slot - clearing afterwards would race a concurrent lease that had already
+#     taken the slot and written its own override. A return that then fails leaves
+#     a worktree that is still ours and may still have a live agent in it, so every
+#     such path puts the override back with
+#     restore_worktree_commit_signing_override.
 
 # worktree_signing_is_in_effect <worktree-path>
 # True when commit.gpgsign or tag.gpgsign resolves true for <worktree-path>, i.e.
@@ -97,5 +103,23 @@ clear_worktree_commit_signing_override() {
   for key in commit.gpgsign tag.gpgsign; do
     git -C "$wt" config --worktree --unset-all "$key" >/dev/null 2>&1 || true
   done
+  return 0
+}
+
+# restore_worktree_commit_signing_override <worktree-path>
+# Compensating action for a cleared override whose slot was NOT actually handed
+# back: the worktree is still ours and may still hold a live agent, which must
+# keep its unsigned-commit guarantee. Re-applies the same gated disable, and is
+# a no-op wherever the disable itself is (a gone path, a non-worktree, a repo
+# that never signs). Best-effort by contract: it warns at most, always returns
+# success, and never becomes the reason a caller reports failure - the caller's
+# own return failure stays the reported outcome.
+restore_worktree_commit_signing_override() {
+  local wt=$1
+  [ -n "$wt" ] || return 0
+  [ -d "$wt" ] || return 0
+  if ! disable_worktree_commit_signing "$wt" 2>/dev/null; then
+    echo "warning: could not restore the worktree-scoped commit-signing disable in $wt; an agent still running there may block on an interactive signer" >&2
+  fi
   return 0
 }

@@ -174,12 +174,52 @@ test_unsigned_repo_left_untouched() {
   pass "a repo where signing is not in effect is left byte-untouched"
 }
 
+# The clear runs before the slot is handed back, so a hand-back that never happens
+# (a refused treehouse return) leaves a worktree that is still ours and may still
+# hold a live agent. The compensating restore has to make it whole again.
+test_restore_puts_a_cleared_override_back() {
+  disable_worktree_commit_signing "$WT" || fail "setup: disable returned non-zero"
+  clear_worktree_commit_signing_override "$WT"
+  [ "$(git -C "$WT" config commit.gpgsign)" = true ] \
+    || fail "setup: the override was not cleared first"
+
+  restore_worktree_commit_signing_override "$WT" \
+    || fail "restore returned non-zero"
+
+  [ "$(git -C "$WT" config commit.gpgsign)" = false ] \
+    || fail "restore did not put commit.gpgsign back"
+  [ "$(git -C "$WT" config tag.gpgsign)" = false ] \
+    || fail "restore did not put tag.gpgsign back"
+  [ "$(git -C "$SIBLING" config commit.gpgsign)" = true ] \
+    || fail "restore leaked into a sibling worktree"
+  git -C "$WT" commit -q --allow-empty -m restored \
+    || fail "worktree still blocks on the unavailable signer after restore"
+
+  pass "restore re-scopes the signing disable to a worktree that was never handed back"
+}
+
+# Best-effort by contract: the restore compensates a failure and must never become
+# a second failure of its own, whatever it is pointed at.
+test_restore_is_best_effort() {
+  local not_a_repo="$TMP_ROOT/restore-not-a-repo"
+  mkdir -p "$not_a_repo"
+  restore_worktree_commit_signing_override "$not_a_repo" 2>/dev/null \
+    || fail "restore returned non-zero for an existing non-git path"
+  restore_worktree_commit_signing_override "$TMP_ROOT/restore-gone" \
+    || fail "restore returned non-zero for a path that no longer exists"
+  restore_worktree_commit_signing_override "" \
+    || fail "restore returned non-zero for an empty path"
+  pass "restore never fails a teardown, whatever it is pointed at"
+}
+
 test_baseline_block_reproduces
 test_disable_scopes_to_worktree
 test_disabled_worktree_commits_primary_still_blocks
 test_idempotent
 test_rejects_non_worktree
 test_unsigned_repo_left_untouched
-# Runs last: it deliberately restores signing in $WT, which earlier assertions need.
+# Run last: these deliberately restore signing in $WT, which earlier assertions need.
 test_teardown_cleanup_unsticks_pool_slot
 test_cleanup_is_idempotent_and_best_effort
+test_restore_puts_a_cleared_override_back
+test_restore_is_best_effort

@@ -49,6 +49,7 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) refused return with a live worktree                   -> signing stays disabled
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1159,6 +1160,68 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
 }
 
+# A refused return means the slot never went back and the crew process may still
+# be alive in that worktree. Teardown clears the worktree-scoped signing disable
+# before the return (it must, while it still owns the slot), so a refusal has to
+# put it back - otherwise the next commit by that live agent blocks forever on the
+# interactive signer this whole mechanism exists to avoid.
+test_refused_return_keeps_signing_disabled_for_live_worktree() {
+  local case_dir rc lock
+  case_dir=$(make_case refused-return-signing)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  # The crewmate's inherited situation: signing forced by shared config with a
+  # signer that can never answer, neutralized for this one worktree by fm-spawn.
+  git -C "$case_dir/project" config commit.gpgsign true
+  git -C "$case_dir/project" config tag.gpgsign true
+  git -C "$case_dir/project" config gpg.program "$case_dir/nonexistent-signer"
+  git -C "$case_dir/project" config extensions.worktreeConfig true
+  git -C "$case_dir/wt" config --worktree commit.gpgsign false
+  git -C "$case_dir/wt" config --worktree tag.gpgsign false
+
+  add_persistent_lock_treehouse "$case_dir"
+  add_lsof_live_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+
+  set +e
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "refused-return-signing: teardown should still refuse on a live lock"
+  # The refusal must be reported by the return failure itself, not masked or
+  # reworded by the signing restore.
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "refused-return-signing: the original return failure diagnostics were lost"
+  assert_not_contains "$(cat "$case_dir/stderr")" "could not restore" \
+    "refused-return-signing: the signing restore itself failed"
+
+  [ "$(git -C "$case_dir/wt" config commit.gpgsign)" = false ] \
+    || fail "refused-return-signing: live worktree was handed back commit signing"
+  [ "$(git -C "$case_dir/wt" config tag.gpgsign)" = false ] \
+    || fail "refused-return-signing: live worktree was handed back tag signing"
+  [ "$(git -C "$case_dir/project" config commit.gpgsign)" = true ] \
+    || fail "refused-return-signing: the operator's shared signing setting was stripped"
+  # The payoff: a still-live agent can commit, exactly as before teardown ran.
+  # Drop the simulated lock first - it stands in for the live git process, and any
+  # commit blocks on it for reasons that have nothing to do with signing.
+  rm -f "$lock"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "still unsigned" 2>/dev/null \
+    || fail "refused-return-signing: a commit in the still-live worktree blocked on the signer"
+
+  pass "a refused treehouse return leaves the live worktree's signing disable in place"
+}
+
 test_empty_retry_wait_uses_default_without_aborting() {
   local case_dir rc lock attempt_file
   case_dir=$(make_case empty-retry-wait)
@@ -1861,5 +1924,6 @@ test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
 test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
+test_refused_return_keeps_signing_disabled_for_live_worktree
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
