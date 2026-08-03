@@ -35,8 +35,13 @@ Never produce a bearings-style four-section digest from here, and never write a 
    Use the contract below.
    Never present two items in one message, and never present an item plus a "and also..." preview of the next.
 
-4. **Act on the answer, then present the next item.**
+4. **Act on the answer, then present the next item in the same message.**
    Record the answer per the table below before moving on, so the next `bin/fm-rounds-queue.sh` run reflects it.
+   Presenting the next item IS the continuation - never ask for permission to continue.
+   A turn that acts on an answer must END with the next item already presented, so the captain returns to a decision waiting rather than to an offer.
+   Banned closers, in every form: "ready for the next one", "say the word", "want me to carry on", "shall I pull item N".
+   The only reasons to end a turn without the next item are the queue being empty (go to step 5) or the captain saying to stop.
+   This also holds after a mid-walk wake: report the wake, then present the current position 1 in the same message.
 
 5. **Close the walk.**
    Report what was actioned, then the batched surfaces: `dispatchable[]` as ONE confirm line the captain answers, and `conflicts[]` if non-empty.
@@ -119,7 +124,7 @@ The supervision watcher injects wakes into this same conversation, constantly, a
 
 - **A wake arrives mid-walk:** handle it per `AGENTS.md` section 8 first, then resume by re-running `bin/fm-rounds-queue.sh` and presenting the new position 1. If the wake resolved the item that was on screen, it is simply gone from the recomputed queue - nothing to reconcile.
 - **The captain answers out of order:** act on what they said, record it, recompute, present the new first item. Out-of-order is input, not an error.
-- **The captain goes quiet:** stop presenting. Do not check in, do not nag. Supervision stays live per section 8; the next message or wake resumes normally.
+- **The captain goes quiet:** stop presenting further items, but leave the current one standing. Do not check in, do not nag, and do not replace it with a summary or a "let me know" - the captain should come back to a decision already waiting, not to an offer to resume. Supervision stays live per section 8; the next message or wake resumes normally.
 - **Re-invoked later:** identical to being resumed. There is no session to be inside or outside of.
 
 ## What this skill must never do
