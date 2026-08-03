@@ -109,10 +109,12 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   Every spawned worktree (ship, scout, and secondmate home) has commit and tag
-#   signing disabled scoped to that worktree only, so an autonomous crewmate never
-#   blocks on an interactive commit signer; the primary and siblings keep their
-#   normal signing (fm-sign-lib.sh).
+#   Every spawned worktree (ship, scout, and secondmate home) whose inherited config
+#   would actually sign has commit and tag signing disabled scoped to that worktree
+#   only, so an autonomous crewmate never blocks on an interactive commit signer;
+#   the primary and siblings keep their normal signing, repos that never sign are
+#   left untouched, and teardown clears the override when a pooled slot goes back
+#   for reuse (fm-sign-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1456,10 +1458,14 @@ fi
 # autonomous crewmate can never satisfy an interactive commit signer, so a global
 # commit.gpgsign=true would block every commit; the primary checkout, sibling
 # pooled worktrees, and the captain's own repos keep their normal signing
-# (fm-sign-lib.sh). Secondmate homes are included deliberately: they are worktrees
-# of the firstmate repo an autonomous agent commits shared material in, so the same
-# block would hit them. Best-effort: a failure warns but does not abort a spawn
-# whose worktree is already live.
+# (fm-sign-lib.sh). Secondmate homes are included deliberately, in both shapes
+# fm-home-seed.sh produces - a treehouse-leased worktree of the firstmate repo, and
+# a standalone `git clone` whose main worktree is the home - because an autonomous
+# agent commits shared material in either one, so the same block would hit them.
+# For the leased shape teardown clears the override when the slot goes back to the
+# pool; for the clone shape the override belongs to that clone for its lifetime,
+# which is exactly its scope. Best-effort: a failure warns but does not abort a
+# spawn whose worktree is already live.
 if ! disable_worktree_commit_signing "$WT"; then
   echo "warning: could not disable commit signing in $WT; autonomous commits may block on an interactive signer" >&2
 fi

@@ -102,6 +102,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-sign-lib.sh
+. "$SCRIPT_DIR/fm-sign-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -671,6 +673,11 @@ cleanup_stale_lock_for_safety_check() {
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
+
+  # A returned slot is reused, not deleted, so the task's worktree-scoped signing
+  # disable must be cleared here or it would stick to the pool slot forever. This
+  # is best-effort by contract and never blocks the return.
+  clear_worktree_commit_signing_override "$dir"
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.

@@ -106,8 +106,80 @@ test_rejects_non_worktree() {
   pass "disable rejects an empty or non-worktree path"
 }
 
+# Firstmate returns pooled worktrees for REUSE (treehouse return) instead of
+# deleting them, so the override must belong to the task, not the slot. Teardown's
+# cleanup has to leave a recycled slot signing exactly as it did before.
+test_teardown_cleanup_unsticks_pool_slot() {
+  disable_worktree_commit_signing "$WT" || fail "setup: disable returned non-zero"
+  [ "$(git -C "$WT" config commit.gpgsign)" = false ] \
+    || fail "setup: worktree override was not in place"
+
+  clear_worktree_commit_signing_override "$WT" \
+    || fail "cleanup returned non-zero for a worktree carrying the override"
+
+  [ "$(git -C "$WT" config commit.gpgsign)" = true ] \
+    || fail "recycled slot still carries commit.gpgsign=false"
+  [ "$(git -C "$WT" config tag.gpgsign)" = true ] \
+    || fail "recycled slot still carries tag.gpgsign=false"
+  assert_no_grep "gpgsign" "$POOL/.git/worktrees/wt-a/config.worktree" \
+    "returned slot's config.worktree must not keep a gpgsign override"
+  # The operator's real signing setting must survive the cleanup untouched.
+  assert_no_grep "gpgsign" "$POOL/.git/config" \
+    "cleanup must not write or strip gpgsign in the shared pooled config"
+  git -C "$WT" commit -q --allow-empty -m nope 2>/dev/null \
+    && fail "recycled slot commit succeeded (signing still disabled after cleanup)"
+
+  pass "teardown cleanup returns a pool slot with its normal signing restored"
+}
+
+# Best-effort by contract: cleanup must never fail a teardown, whatever it is
+# pointed at - including a repo that never had the override at all.
+test_cleanup_is_idempotent_and_best_effort() {
+  clear_worktree_commit_signing_override "$WT" \
+    || fail "repeat cleanup returned non-zero"
+  clear_worktree_commit_signing_override "$SIBLING" \
+    || fail "cleanup returned non-zero for a worktree that never had the override"
+  clear_worktree_commit_signing_override "$TMP_ROOT/not-a-repo" \
+    || fail "cleanup returned non-zero for a non-git path"
+  clear_worktree_commit_signing_override "" \
+    || fail "cleanup returned non-zero for an empty path"
+  [ "$(git -C "$SIBLING" config commit.gpgsign)" = true ] \
+    || fail "cleanup altered signing for an untouched sibling worktree"
+  pass "cleanup is idempotent and never fails a teardown"
+}
+
+# The blast-radius gate: a repo where signing is not in effect gets the whole
+# mechanism skipped, so extensions.worktreeConfig stops accumulating across every
+# project clone firstmate ever touches.
+test_unsigned_repo_left_untouched() {
+  local unsigned_pool="$TMP_ROOT/unsigned-pool" unsigned_wt="$TMP_ROOT/unsigned-wt" before after
+  git init -q "$unsigned_pool"
+  git -C "$unsigned_pool" config commit.gpgsign false
+  git -C "$unsigned_pool" config tag.gpgsign false
+  git -C "$unsigned_pool" commit -q --allow-empty --no-gpg-sign -m init
+  git -C "$unsigned_pool" worktree add -q "$unsigned_wt" HEAD
+  before=$(cat "$unsigned_pool/.git/config")
+
+  disable_worktree_commit_signing "$unsigned_wt" \
+    || fail "disable should succeed (as a no-op) where signing is not in effect"
+
+  after=$(cat "$unsigned_pool/.git/config")
+  [ "$before" = "$after" ] \
+    || fail "shared config of a non-signing repo was modified"
+  [ -z "$(git -C "$unsigned_wt" config --get extensions.worktreeConfig)" ] \
+    || fail "extensions.worktreeConfig was written into a repo that never signs"
+  assert_absent "$unsigned_pool/.git/worktrees/unsigned-wt/config.worktree" \
+    "a non-signing worktree must not get a config.worktree"
+
+  pass "a repo where signing is not in effect is left byte-untouched"
+}
+
 test_baseline_block_reproduces
 test_disable_scopes_to_worktree
 test_disabled_worktree_commits_primary_still_blocks
 test_idempotent
 test_rejects_non_worktree
+test_unsigned_repo_left_untouched
+# Runs last: it deliberately restores signing in $WT, which earlier assertions need.
+test_teardown_cleanup_unsticks_pool_slot
+test_cleanup_is_idempotent_and_best_effort

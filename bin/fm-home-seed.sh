@@ -41,6 +41,8 @@ REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-sign-lib.sh
+. "$SCRIPT_DIR/fm-sign-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -582,6 +584,9 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
+  # The slot goes back into the firstmate repo's own pool for reuse, so drop any
+  # worktree-scoped signing disable with it. Best-effort; never blocks the return.
+  clear_worktree_commit_signing_override "$abs_home"
   ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
