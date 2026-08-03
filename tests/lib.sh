@@ -34,19 +34,6 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
-# Isolate fixture git operations from the host's global/system git config so
-# fixture commits never inherit the operator's unattended-hostile settings -
-# above all commit.gpgsign=true backed by a GUI/1Password signer, which hangs or
-# fails ("failed to write commit object") every fixture commit in a
-# non-interactive run, and a global url.<ssh>.insteadOf rewrite. This is the same
-# host-independence the git-identity/fixture helpers already intend. Suites that
-# must exercise a specific git config (the signing suites) re-export
-# GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM themselves after sourcing this library,
-# which naturally overrides these defaults.
-: "${GIT_CONFIG_GLOBAL:=/dev/null}"
-: "${GIT_CONFIG_SYSTEM:=/dev/null}"
-export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -66,50 +53,28 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The cleanup trap is installed here, at source time, in the SOURCING
-# shell. A test file that needs extra teardown (e.g. killing a daemon) should
-# define its own EXIT trap and call fm_test_cleanup from inside it so registered
-# dirs are still removed.
-#
-# Registration goes through a file, not only the array, because the universal
-# call form is `TMP_ROOT=$(fm_test_tmproot x)`: command substitution runs the
-# function in a SUBSHELL, so an array append (or a trap installed) in there dies
-# with that subshell and the directory is never cleaned up. A file append
-# survives, and $$ stays the sourcing shell's pid inside a subshell, so the
-# registry path is the same on both sides. The array remains supported for the
-# callers that append to it directly from the top-level shell.
-#
-# Initialization is guarded on the registry being unset, the same idempotence the
-# FM_TEST_LIB_SOURCED guard above gives the rest of the file: truncating an
-# already-populated registry would strand every directory registered before it.
+# on EXIT. The first call installs the cleanup trap. A test file that needs
+# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
+# call fm_test_cleanup from inside it so registered dirs are still removed.
 
-if [ -z "${FM_TEST_CLEANUP_REGISTRY:-}" ]; then
-  FM_TEST_CLEANUP_DIRS=()
-  FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.$$"
-  rm -f "$FM_TEST_CLEANUP_REGISTRY"
-fi
+FM_TEST_CLEANUP_DIRS=()
 
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
-  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
-    while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
-    done < "$FM_TEST_CLEANUP_REGISTRY"
-    rm -f "$FM_TEST_CLEANUP_REGISTRY"
-  fi
 }
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"
+  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
+    trap fm_test_cleanup EXIT
+  fi
+  FM_TEST_CLEANUP_DIRS+=("$root")
   printf '%s\n' "$root"
 }
-
-trap fm_test_cleanup EXIT
 
 # --- fakebin / PATH shims ---------------------------------------------------
 #
@@ -186,17 +151,20 @@ fm_write_meta() {
   done
 }
 
-# fm_write_secondmate_meta <file> <home> [window] [projects]: write the standard
-# kind=secondmate meta block used across the secondmate suites. window defaults
-# to firstmate:fm-<basename-of-home-dir's parent id>? No - window is explicit;
-# defaults to firstmate:fm-domain and projects to alpha to match the common case.
+# fm_write_secondmate_meta <file> <home> [window] [projects] [harness]: write the
+# standard kind=secondmate meta block used across the secondmate suites. Window
+# defaults to firstmate:fm-<id>, projects defaults to alpha, and harness defaults
+# to echo to match the common case.
 fm_write_secondmate_meta() {
-  local file=$1 home=$2 window=${3:-firstmate:fm-domain} projects=${4:-alpha}
+  local file=$1 home=$2 id window projects=${4:-alpha} harness=${5:-echo}
+  id=$(basename "$file" .meta)
+  window=${3:-firstmate:fm-$id}
   fm_write_meta "$file" \
     "window=$window" \
+    "endpoint_task_id=$id" \
     "worktree=$home" \
     "project=$home" \
-    "harness=echo" \
+    "harness=$harness" \
     "kind=secondmate" \
     "mode=secondmate" \
     "yolo=off" \

@@ -4,14 +4,15 @@
 # (bin/backends/herdr.sh's created-vs-adopted default-tab-prune gate; see
 # docs/herdr-backend.md "Default-tab prune" / the incident writeup there).
 #
-# Reproduces the collision shape against a private, throwaway HERDR_SESSION
-# (never the captain's default): a pre-existing workspace whose label happens
-# to equal a task's own per-task label (P4), holding one tab labeled "1" with a
-# live long-running process in that pane - the same adopted-workspace state the
-# 2026-07-02 incident hinged on. Then drives the real spawn-time
-# container_ensure + create_task path and asserts the live pane (and its live
-# process) survive untouched. Also exercises the normal happy path (a genuinely
-# fresh workspace's seeded default tab gets pruned, leaving exactly one clean
+# Reproduces the exact collision shape against a private, throwaway
+# HERDR_SESSION (never the captain's default): a startup-workspace-shaped
+# layout - one tab labeled "1" in a pre-existing workspace labeled
+# "firstmate" - with a live long-running process in that pane, exactly as
+# the captain's own live crewmate session looked at incident time. Then
+# drives the real spawn-time container_ensure +
+# create_task path and asserts the live pane (and its live process) survive
+# untouched. Also exercises the normal happy path (a genuinely fresh
+# workspace's seeded default tab gets pruned, leaving exactly one clean
 # fm-<id> task tab), mirroring tests/fm-backend-herdr-smoke.test.sh's broader
 # coverage but scoped tightly to this one safety property.
 #
@@ -32,6 +33,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
 SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-prune-safety.XXXXXX")
@@ -42,63 +48,80 @@ cleanup_all() {
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
 
-# --- 1. reproduce the label-collision workspace shape (P4) -------------------
-# Explicitly label the pre-existing workspace with a task's own per-task label
-# ("fm-prunesafety-e2e") to create the collision deterministically - the state
-# in which container_ensure adopts a workspace it did not create. The seeded
-# tab remains labeled "1".
+# --- 1. reproduce the label-collision startup-workspace shape ---------------
+# Explicitly label the startup workspace "firstmate" to create the collision
+# deterministically. Herdr's unlabeled workspace-label derivation is not a
+# stable test contract, while the adopted-workspace state is the behavior
+# this regression must exercise. The seeded tab remains labeled "1".
 
-COLLIDE_LABEL="fm-prunesafety-e2e"
-LIVE_CWD="$SCRATCH/collide"
+LIVE_CWD="$SCRATCH/firstmate"
 mkdir -p "$LIVE_CWD"
 
 fm_backend_herdr_server_ensure "$SESSION" || fail "could not start the isolated session's server"
 
-CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --label "$COLLIDE_LABEL" --no-focus) \
-  || fail "could not create the label-collision workspace"
+CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --label firstmate --no-focus) \
+  || fail "could not create the label-collision startup workspace"
 LIVE_WSID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.workspace.workspace_id // empty')
 LIVE_TAB_ID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.tab.tab_id // empty')
 LIVE_PANE_ID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.root_pane.pane_id // empty')
 if [ -z "$LIVE_WSID" ] || [ -z "$LIVE_TAB_ID" ] || [ -z "$LIVE_PANE_ID" ]; then
-  fail "could not parse the workspace's ids from workspace create: $CREATE_OUT"
+  fail "could not parse the startup workspace's ids from workspace create: $CREATE_OUT"
 fi
 
 LIVE_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$LIVE_LABEL" = "$COLLIDE_LABEL" ] || fail "the workspace label should be '$COLLIDE_LABEL', got '$LIVE_LABEL' - repro setup is wrong"
-pass "repro setup: a pre-existing workspace labeled '$COLLIDE_LABEL' collides with a task's own per-task label"
+[ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace label should be 'firstmate', got '$LIVE_LABEL' - repro setup is wrong"
+pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with the primary home's own label"
 
 # Simulate a live long-running agent in that pane: a heartbeat loop that
 # appends to a marker file, so liveness is independently verifiable (not just
 # "the pane object still exists").
+PANE_READY=false
+READY_SAMPLES=0
+for _ in $(seq 1 100); do
+  PROCESS_INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$LIVE_PANE_ID" 2>/dev/null || true)
+  if printf '%s' "$PROCESS_INFO" | jq -e '
+    .result.process_info as $process
+    | ($process.foreground_processes | length == 1)
+      and ($process.foreground_processes[0].pid == $process.shell_pid)
+  ' >/dev/null 2>&1; then
+    READY_SAMPLES=$((READY_SAMPLES + 1))
+    if [ "$READY_SAMPLES" -ge 10 ]; then
+      PANE_READY=true
+      break
+    fi
+  else
+    READY_SAMPLES=0
+  fi
+  sleep 0.1
+done
+[ "$PANE_READY" = true ] || fail "the startup workspace's shell did not become ready"
+
 MARKER="$SCRATCH/heartbeat.log"
 fm_backend_herdr_cli "$SESSION" pane run "$LIVE_PANE_ID" \
   "sh -c 'while true; do date +%s >> $MARKER; sleep 1; done'" >/dev/null 2>&1 \
   || fail "could not start the live heartbeat process in the startup workspace's pane"
-# The pane's interactive shell can be slow to reach the prompt (e.g. a heavy
-# zsh completion init), so poll for the first heartbeat rather than assuming a
-# fixed grace - the marker file is what proves the process is really running.
-for _i in $(seq 1 30); do [ -s "$MARKER" ] && break; sleep 1; done
+sleep 2
 [ -s "$MARKER" ] || fail "the live heartbeat process did not start writing its marker file"
 BEFORE_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
 pass "repro setup: a live long-running process is running in the startup workspace's single tab (label '1'), heartbeating to a marker file"
 
-# --- 2. run the real spawn-time path: container_ensure adopts the colliding -
+# --- 2. run the real spawn-time path: container_ensure adopts the startup --
 # workspace by label match; create_task must NOT prune its tab.
 
-RAW=$(fm_backend_herdr_container_ensure "$LIVE_CWD" "$COLLIDE_LABEL") || fail "container_ensure failed"
+RAW=$(fm_backend_herdr_container_ensure "$LIVE_CWD") || fail "container_ensure failed"
 CONTAINER=${RAW%%$'\t'*}
 SEEDED_TAB_ID=${RAW#*$'\t'}
 [ "$CONTAINER" = "$SESSION:$LIVE_WSID" ] || fail "container_ensure should have ADOPTED the pre-existing label-colliding workspace ($LIVE_WSID), got '$CONTAINER'"
 [ -z "$SEEDED_TAB_ID" ] || fail "an ADOPTED workspace must report an EMPTY seeded default tab id (the created-vs-adopted gate), got '$SEEDED_TAB_ID' - this is exactly what would reproduce the 2026-07-02 self-kill"
-pass "fixed: container_ensure adopts the label-colliding workspace and reports NO seeded default tab (never a prune candidate)"
+pass "fixed: container_ensure adopts the label-colliding startup workspace and reports NO seeded default tab (never a prune candidate)"
 
-TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$COLLIDE_LABEL" "$LIVE_CWD" "$SEEDED_TAB_ID") \
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" fm-prunesafety-e2e "$LIVE_CWD" "$SEEDED_TAB_ID") \
   || fail "create_task failed"
 read -r NEW_TAB_ID NEW_PANE_ID <<EOF
 $TASK_IDS
@@ -112,15 +135,8 @@ fi
 if ! herdr pane get "$LIVE_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "REGRESSION (2026-07-02 self-kill): the live startup-workspace pane was CLOSED by create_task"
 fi
-# Poll for continued heartbeat growth rather than a fixed grace: liveness is
-# proven by the marker advancing, and shell/pane scheduling jitter should not
-# make a still-running process look dead.
-AFTER_COUNT=$BEFORE_COUNT
-for _i in $(seq 1 15); do
-  AFTER_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
-  [ "$AFTER_COUNT" -gt "$BEFORE_COUNT" ] && break
-  sleep 1
-done
+sleep 2
+AFTER_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
 [ "$AFTER_COUNT" -gt "$BEFORE_COUNT" ] \
   || fail "REGRESSION: the live heartbeat process stopped writing after create_task ran - it was killed even though its pane object survived"
 pass "fixed: the live pane (and its live process) survived create_task untouched - the exact 2026-07-02 self-kill incident does not reproduce"
@@ -138,7 +154,7 @@ fm_backend_herdr_kill "$SESSION:$LIVE_PANE_ID"
 
 HAPPY_CWD="$SCRATCH/happy-project"
 mkdir -p "$HAPPY_CWD"
-HAPPY_RAW=$(fm_backend_herdr_container_ensure "$HAPPY_CWD" fm-prunesafety-happy) || fail "happy-path container_ensure failed"
+HAPPY_RAW=$(fm_backend_herdr_container_ensure "$HAPPY_CWD") || fail "happy-path container_ensure failed"
 HAPPY_CONTAINER=${HAPPY_RAW%%$'\t'*}
 HAPPY_SEEDED=${HAPPY_RAW#*$'\t'}
 [ -n "$HAPPY_SEEDED" ] || fail "happy path: expected a genuinely fresh workspace with a non-empty seeded default tab id"

@@ -13,10 +13,9 @@
 # empirical verification): ONE zellij session (default name "firstmate",
 # overridable via FM_ZELLIJ_SESSION for test isolation - mirrors herdr's
 # HERDR_SESSION), ONE tab per task, with caller-facing label "fm-<id>" and a
-# home-scoped actual title. No per-task workspace split (unlike herdr, which
-# gives each task its own workspace): zellij has no workspace concept, only
-# sessions/tabs/panes, so this stays exactly the report's original choice.
-# Target string shape:
+# home-scoped actual title. No per-home workspace split (unlike herdr's later
+# P3 refinement): zellij has no workspace concept, only sessions/tabs/panes,
+# so this stays exactly the report's original choice. Target string shape:
 # "<zellij-session>:<pane-id>" (pane id is a bare non-negative integer with no
 # embedded colon, so splitting on the FIRST colon is trivially correct and
 # mirrors herdr's target-string convention).
@@ -502,8 +501,8 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # also the load-bearing defense against the
 # unconditional-exit-0 CLI quirk documented in the file header: a truly dead
 # target never shows a change, so it correctly reports pending/unknown rather
-# than a false "sent". Echoes empty|pending|unknown|send-failed, the SAME
-# vocabulary fm-send.sh already branches on for tmux and herdr.
+# than a false "sent". Echoes empty|pending|unknown|send-failed, a subset of the
+# proof-carrying submit vocabulary.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} typed after i=0
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }

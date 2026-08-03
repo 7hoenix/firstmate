@@ -36,6 +36,12 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # absorbs them only with positive provably-working evidence, while the daemon uses
 # its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
 # needs a custom verb vocabulary; absent, this default applies.
+#
+# Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
+# legacy lines that lack a standard terminal verb. status_is_captain_relevant is
+# verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
+# merely because its prose contains one of those tokens (for example
+# "working: rebased onto merged #76").
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
@@ -51,38 +57,21 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause. Far longer than the wedge
-# threshold (FM_STALE_ESCALATE_SECS, default 240s) so a deliberate wait is not
-# nagged like a wedge, yet finite so a forgotten pause cannot rot invisibly - it
-# re-surfaces once for a recheck every window. One hour by default; both consumers
-# read FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner.
+# Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
+# Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
+# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
+# invisibly - it re-surfaces once for a recheck every window. One hour by default;
+# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
+# one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
-# Bounds for a per-pause inline recheck cadence (see pause_recheck_secs). A declared
-# pause may carry an optional [recheck=<duration>] token to WIDEN its recheck window
-# past the fleet default - the captain-gated case, e.g. a merge/release lane that
-# legitimately idles for many hours and should not be rechecked hourly. The parsed
-# value is CLAMPED to this range so no token can nag faster than the floor (turning a
-# pause into a wedge) or push a recheck past the ceiling: a forgotten pause must still
-# re-surface within a day, the safety property both supervisors preserve. Overridable.
-FM_PAUSE_RECHECK_MIN_SECS_DEFAULT=300
-FM_PAUSE_RECHECK_MAX_SECS_DEFAULT=86400
-
-# Exponential-backoff ceiling for a declared pause's recheck interval (see
-# pause_backoff_secs). A pause that keeps re-surfacing unchanged widens its own recheck
-# window base*2^streak, so a long-idle parked lane is rechecked far less often than
-# hourly while still re-surfacing (the forgotten-pause safety property). This bounds how
-# far backoff may WIDEN a base; it is distinct from the [FM_PAUSE_RECHECK_MIN_SECS,
-# FM_PAUSE_RECHECK_MAX_SECS] clamp above, which bounds what a lane may DECLARE as its base.
-# 12h by default; both supervisors read it so the ceiling has one owner. Overridable.
-# shellcheck disable=SC2034 # Read by the watcher and daemon, not this lib.
-FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT=43200
-
-# The resolution verb that CLOSES a keyed decision opened by needs-decision or
-# blocked. See status_open_decisions below for the full durable-decision contract;
-# this is the one owner of the verb literal, overridable via FM_CLASSIFY_RESOLVE_VERB.
+# The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
+# status decision opened by needs-decision or blocked. See status_open_decisions
+# below for the status-fold contract. The transfer verb is written only after
+# fm-decision-hold.sh has verified the corresponding captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
+FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
@@ -91,13 +80,35 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+# 0 if the given (last) status line's leading verb is a real terminal captain verb
+# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
+# callers that need legacy free-text matching use status_is_captain_relevant.
+status_is_terminal_verb() {
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    done|needs-decision|blocked|failed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # 0 if the given (last) status line matches a captain-relevant verb.
+# Verb-aware by default: terminal verbs always match; nonterminal progress verbs
+# (working, resolved, captain-held) and paused never match from free-text prose;
+# only lines without those leading verbs may still match free-text tokens for
+# legacy bare lines such as "merged" or "PR ready".
 status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+      return 1
+      ;;
+  esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
-    verb=$(status_line_verb "$line")
     case "$verb" in
       done|needs-decision|blocked|failed) return 0 ;;
     esac
@@ -116,71 +127,17 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
-# Parse a compact duration token into seconds on stdout: a suffix of s/m/h/d
-# (45s, 30m, 8h, 2d) or a bare integer read as seconds. Non-zero on an
-# unparseable token so the caller can fall back to a default.
-_fm_parse_duration() {  # <token> -> seconds
-  local t=$1 num unit
-  case "$t" in ''|*[!0-9smhd]*) return 1 ;; esac
-  case "$t" in
-    *s) unit=1;     num=${t%s} ;;
-    *m) unit=60;    num=${t%m} ;;
-    *h) unit=3600;  num=${t%h} ;;
-    *d) unit=86400; num=${t%d} ;;
-    *)  unit=1;     num=$t ;;
-  esac
-  case "$num" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s' "$(( num * unit ))"
-}
-
-# The per-pause recheck cadence in seconds. A declared pause line may carry an
-# optional [recheck=<duration>] token between the verb and the colon to WIDEN its
-# recheck window past the fleet default (FM_PAUSE_RESURFACE_SECS) - the captain-gated
-# lane, e.g. `paused [recheck=8h]: awaiting the release cut`. With no token, returns
-# that default so behavior is byte-identical to before. The parsed value is CLAMPED to
-# [FM_PAUSE_RECHECK_MIN_SECS, FM_PAUSE_RECHECK_MAX_SECS] so no crew-written token can
-# recheck faster than the floor or push past the ceiling (a forgotten pause must still
-# re-surface within a day). ONE owner for the token grammar; both supervisors read it here.
-pause_recheck_secs() {  # <status-line> -> seconds
-  local line=$1 prefix tok secs
-  local default=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
-  local min=${FM_PAUSE_RECHECK_MIN_SECS:-$FM_PAUSE_RECHECK_MIN_SECS_DEFAULT}
-  local max=${FM_PAUSE_RECHECK_MAX_SECS:-$FM_PAUSE_RECHECK_MAX_SECS_DEFAULT}
-  prefix=${line%%:*}
-  case "$prefix" in
-    *\[recheck=*\]*)
-      tok=${prefix#*\[recheck=}
-      tok=${tok%%\]*}
-      secs=$(_fm_parse_duration "$tok") || { printf '%s' "$default"; return; }
-      ;;
-    *) printf '%s' "$default"; return ;;
-  esac
-  [ "$secs" -lt "$min" ] && secs=$min
-  [ "$secs" -gt "$max" ] && secs=$max
-  printf '%s' "$secs"
-}
-
-# The EFFECTIVE recheck interval after exponential backoff: a base interval doubled once
-# per consecutive surfaced-and-unchanged recheck (the streak), capped so a forgotten
-# pause still re-surfaces. This is the asymmetric-backoff math with ONE owner, called by
-# both the watcher and the afk daemon so the two supervisors never drift on next-due
-# timing. It only picks the multiplier; the caller still owns the anchor (the status-file
-# or ack mtime) that decides when the interval has elapsed, and owns resetting the streak
-# to 0 on a positive signal (a fresh crew status line or an authoritative `working`
-# verdict) - never on an ambiguous read. The ceiling is max(base, FM_PAUSE_RESURFACE_MAX_SECS)
-# so a lane that DECLARED a base longer than the ceiling keeps its declared base rather
-# than being shortened by backoff; a huge streak is capped so the shift cannot overflow.
-pause_backoff_secs() {  # <base-secs> <streak> -> effective seconds
-  local base=$1 streak=$2 max ceiling secs
-  case "$base" in ''|*[!0-9]*) base=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT} ;; esac
-  case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
-  [ "$streak" -gt 30 ] && streak=30
-  max=${FM_PAUSE_RESURFACE_MAX_SECS:-$FM_PAUSE_RESURFACE_MAX_SECS_DEFAULT}
-  ceiling=$max
-  [ "$base" -gt "$ceiling" ] && ceiling=$base
-  secs=$(( base << streak ))
-  { [ "$secs" -gt "$ceiling" ] || [ "$secs" -lt "$base" ]; } && secs=$ceiling
-  printf '%s' "$secs"
+# 0 if a status line declares either an external-wait pause or a verified
+# captain-held transfer.
+# Both declarations can intentionally leave an exited crew's endpoint idle, so
+# the watcher applies its bounded pause cadence when agent death confirms that
+# no live decision gate is being silenced.
+status_is_paused_or_captain_held() {  # <status-line>
+  local line=$1 verb
+  status_is_paused "$line" && return 0
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
 # --- durable keyed decisions ------------------------------------------------
@@ -189,9 +146,10 @@ pause_backoff_secs() {  # <base-secs> <streak> -> effective seconds
 # (last_status_line above) cannot represent "an earlier decision is still open
 # after a later, unrelated event": a subsequent done/paused/working line silently
 # masks a still-open needs-decision. status_open_decisions is the ONE authoritative
-# statement of the contract that fixes this - a needs-decision/blocked line OPENS a
-# keyed decision, and ONLY an explicit resolution referencing that key CLOSES it; a
-# later unrelated terminal line never clears an open captain decision.
+# statement of the status-fold contract that fixes this - a needs-decision/blocked
+# line OPENS a keyed decision, and only an explicit resolution or a verified
+# captain-held backlog transfer referencing that key CLOSES it; a later unrelated
+# terminal line never clears an open captain decision.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
@@ -203,7 +161,7 @@ pause_backoff_secs() {  # <base-secs> <streak> -> effective seconds
 # key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
-  v=${v%%\[*}   # strip any bracket token(s) after the verb ([key=...], [recheck=...])
+  v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
@@ -250,9 +208,10 @@ EOF
 # is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
 status_open_decisions() {  # <status-file>
-  local f=$1 line verb key note resolve open='' stripped
+  local f=$1 line verb key note resolve held open='' stripped
   [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
@@ -265,13 +224,58 @@ status_open_decisions() {  # <status-file>
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      "$resolve")
+      "$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
   done < "$f"
   printf '%s' "$open"
+}
+
+# Fold material routed-work phases in the same keyed event stream.
+# A working or declared-pause event opens or replaces one phase for its key.
+# A later done, failed, needs-decision, blocked, or resolved event carrying that
+# key closes the phase, because it has moved to a terminal or separately tracked
+# state.
+# A bare legacy event uses the default key, preserving one-phase behavior.
+# This fold is evidence about whether a parent event was explicitly superseded.
+# It is never authoritative current crew state, and consumers must not let an open
+# phase outrank a structured home snapshot or fm-crew-state result.
+_fm_status_open_activities_stream() {
+  local line verb key note resolve held open='' stripped pause
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    verb=$(status_line_verb "$line")
+    key=$(_fm_decision_key "$line") || continue
+    case "$verb" in
+      working|"$pause")
+        note=$(status_line_note "$line")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        ;;
+      done|failed|needs-decision|blocked|"$resolve"|"$held")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        ;;
+    esac
+  done
+  printf '%s' "$open"
+}
+
+status_open_activities() {  # <status-file-or-dash>
+  local f=$1
+  if [ "$f" = - ]; then
+    _fm_status_open_activities_stream
+    return 0
+  fi
+  [ -f "$f" ] || return 0
+  _fm_status_open_activities_stream < "$f"
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped
