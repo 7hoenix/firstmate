@@ -174,6 +174,133 @@ test_unsigned_repo_left_untouched() {
   pass "a repo where signing is not in effect is left byte-untouched"
 }
 
+# $WT is a worktree of an ARBITRARY operator project repo, not just firstmate's own
+# clone, so the documented core.bare footgun is reachable: a bare main repo with
+# linked worktrees is an ordinary pool layout. git ignores core.bare in a linked
+# worktree until extensions.worktreeConfig goes on, at which point every linked
+# worktree of that repo dies with "this operation must be run in a work tree". The
+# disable must refuse rather than inflict that on a repo firstmate does not own.
+test_refuses_bare_common_config() {
+  local bare="$TMP_ROOT/bare-pool.git" wt="$TMP_ROOT/bare-wt" before
+  git clone -q --bare "$POOL" "$bare"
+  git -C "$bare" worktree add -q --detach "$wt" HEAD
+  before=$(cat "$bare/config")
+
+  git -C "$wt" status --porcelain >/dev/null 2>&1 \
+    || fail "setup: the linked worktree of a bare repo should work before the disable"
+
+  disable_worktree_commit_signing "$wt" 2>/dev/null \
+    && fail "disable should refuse a repo whose shared config sets core.bare=true"
+
+  [ "$before" = "$(cat "$bare/config")" ] \
+    || fail "shared config was modified despite the refusal"
+  assert_absent "$bare/worktrees/bare-wt/config.worktree" \
+    "a refused repo must not get a per-worktree config either"
+  git -C "$wt" status --porcelain >/dev/null 2>&1 \
+    || fail "the linked worktree was broken by the refused disable"
+
+  pass "disable refuses a bare shared config instead of breaking every linked worktree"
+}
+
+# The other half of the same footgun: core.worktree in the shared config starts
+# being honored in linked worktrees once the extension is on, so every pooled
+# worktree of that repo silently resolves to the captain's primary working tree.
+test_refuses_core_worktree_in_common_config() {
+  local pool="$TMP_ROOT/cw-pool" wt="$TMP_ROOT/cw-wt" before
+  git init -q "$pool"
+  git -C "$pool" commit -q --allow-empty --no-gpg-sign -m init
+  git -C "$pool" worktree add -q "$wt" HEAD
+  git -C "$pool" config core.worktree "$pool"
+  before=$(cat "$pool/.git/config")
+
+  disable_worktree_commit_signing "$wt" 2>/dev/null \
+    && fail "disable should refuse a repo whose shared config sets core.worktree"
+
+  [ "$before" = "$(cat "$pool/.git/config")" ] \
+    || fail "shared config was modified despite the refusal"
+  assert_absent "$pool/.git/worktrees/cw-wt/config.worktree" \
+    "a refused repo must not get a per-worktree config either"
+  [ "$(git -C "$wt" rev-parse --show-toplevel)" = "$(cd "$wt" && pwd -P)" ] \
+    || fail "the linked worktree was redirected at the primary checkout"
+
+  pass "disable refuses a shared core.worktree instead of redirecting linked worktrees"
+}
+
+# The refusal is about the UNMIGRATED shape only. A repo whose owner already moved
+# the footgun keys into config.worktree, exactly as git-config(1) prescribes, is
+# safe and must still get its task worktree disabled.
+test_allows_migrated_footgun_keys() {
+  local bare="$TMP_ROOT/migrated.git" wt="$TMP_ROOT/migrated-wt"
+  git clone -q --bare "$POOL" "$bare"
+  git -C "$bare" worktree add -q --detach "$wt" HEAD
+  git config --file "$bare/config.worktree" core.bare true
+  git -C "$bare" config --unset core.bare
+
+  disable_worktree_commit_signing "$wt" \
+    || fail "disable should accept a repo whose footgun keys are already migrated"
+
+  [ "$(git -C "$wt" config commit.gpgsign)" = false ] \
+    || fail "worktree commit.gpgsign did not resolve to false"
+  [ "$(git -C "$bare" rev-parse --is-bare-repository)" = true ] \
+    || fail "the main repo stopped being bare"
+  git -C "$wt" commit -q --allow-empty -m migrated \
+    || fail "the linked worktree still blocks on the unavailable signer"
+
+  pass "disable proceeds where the footgun keys are already scoped to config.worktree"
+}
+
+# A pool slot can leave firstmate's control still carrying the disable: teardown
+# refuses on dirty work and the captain finishes with a manual `treehouse return
+# --force`, or treehouse reclaims an expired lease. Re-leasing that slot must repair
+# it, or its next human user commits unsigned under the operator's identity. The
+# leftover also fools the gate - it resolves commit.gpgsign to the stale false - so
+# the clear has to come BEFORE the gate, not after it.
+test_stale_override_is_cleared_before_the_gate() {
+  local pool="$TMP_ROOT/stale-pool" wt="$TMP_ROOT/stale-wt"
+  git init -q "$pool"
+  git -C "$pool" commit -q --allow-empty --no-gpg-sign -m init
+  git -C "$pool" worktree add -q "$wt" HEAD
+  # The slot as a manual --force return hands it back: override still in place.
+  git -C "$wt" config extensions.worktreeConfig true
+  git -C "$wt" config --worktree commit.gpgsign false
+  git -C "$wt" config --worktree tag.gpgsign false
+  # The captain has since turned signing off, so this task earns no disable at all
+  # and the slot must come back clean rather than inheriting the previous one.
+  git -C "$pool" config commit.gpgsign false
+  git -C "$pool" config tag.gpgsign false
+
+  disable_worktree_commit_signing "$wt" \
+    || fail "disable returned non-zero for a slot carrying a stale override"
+
+  assert_no_grep "gpgsign" "$pool/.git/worktrees/stale-wt/config.worktree" \
+    "a re-leased slot must not keep a disable it did not earn from this task"
+
+  pass "disable clears a stale override before the signing gate reads it"
+}
+
+# The same leftover, but this time the task really does need the disable: clearing
+# first must not leave the worktree half-configured.
+test_stale_override_is_reestablished_when_still_needed() {
+  local pool="$TMP_ROOT/restale-pool" wt="$TMP_ROOT/restale-wt"
+  git init -q "$pool"
+  git -C "$pool" commit -q --allow-empty --no-gpg-sign -m init
+  git -C "$pool" worktree add -q "$wt" HEAD
+  git -C "$wt" config extensions.worktreeConfig true
+  git -C "$wt" config --worktree commit.gpgsign false
+
+  disable_worktree_commit_signing "$wt" \
+    || fail "disable returned non-zero for a slot carrying a partial stale override"
+
+  [ "$(git -C "$wt" config commit.gpgsign)" = false ] \
+    || fail "commit.gpgsign was not re-established after the stale clear"
+  [ "$(git -C "$wt" config tag.gpgsign)" = false ] \
+    || fail "tag.gpgsign was not re-established after the stale clear"
+  git -C "$wt" commit -q --allow-empty -m reestablished \
+    || fail "worktree blocks on the unavailable signer after the stale clear"
+
+  pass "a stale override is re-established from scratch when the task still needs it"
+}
+
 # The clear runs before the slot is handed back, so a hand-back that never happens
 # (a refused treehouse return) leaves a worktree that is still ours and may still
 # hold a live agent. The compensating restore has to make it whole again.
@@ -218,6 +345,11 @@ test_disabled_worktree_commits_primary_still_blocks
 test_idempotent
 test_rejects_non_worktree
 test_unsigned_repo_left_untouched
+test_refuses_bare_common_config
+test_refuses_core_worktree_in_common_config
+test_allows_migrated_footgun_keys
+test_stale_override_is_cleared_before_the_gate
+test_stale_override_is_reestablished_when_still_needed
 # Run last: these deliberately restore signing in $WT, which earlier assertions need.
 test_teardown_cleanup_unsticks_pool_slot
 test_cleanup_is_idempotent_and_best_effort
