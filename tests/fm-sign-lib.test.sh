@@ -249,6 +249,31 @@ test_allows_migrated_footgun_keys() {
   pass "disable proceeds where the footgun keys are already scoped to config.worktree"
 }
 
+# A migration that COPIED rather than moved - the key left in the common config and
+# also written into config.worktree - is not a migration at all. That config.worktree
+# belongs to the main worktree; a linked worktree reads only its own copy under
+# .git/worktrees/<id>/, so nothing there neutralizes the common-config value for it
+# and the extension would still redirect every linked worktree. Must refuse.
+test_refuses_footgun_keys_copied_not_moved() {
+  local pool="$TMP_ROOT/copied-pool" wt="$TMP_ROOT/copied-wt" before
+  git init -q "$pool"
+  git -C "$pool" commit -q --allow-empty --no-gpg-sign -m init
+  git -C "$pool" worktree add -q "$wt" HEAD
+  git -C "$pool" config core.worktree "$pool"
+  git config --file "$pool/.git/config.worktree" core.worktree "$pool"
+  before=$(cat "$pool/.git/config")
+
+  disable_worktree_commit_signing "$wt" 2>/dev/null \
+    && fail "disable should refuse when core.worktree was copied but not removed"
+
+  [ "$before" = "$(cat "$pool/.git/config")" ] \
+    || fail "shared config was modified despite the refusal"
+  [ "$(git -C "$wt" rev-parse --show-toplevel)" = "$(cd "$wt" && pwd -P)" ] \
+    || fail "the linked worktree was redirected at the primary checkout"
+
+  pass "disable refuses footgun keys copied into config.worktree but left in the shared config"
+}
+
 # A pool slot can leave firstmate's control still carrying the disable: teardown
 # refuses on dirty work and the captain finishes with a manual `treehouse return
 # --force`, or treehouse reclaims an expired lease. Re-leasing that slot must repair
@@ -348,6 +373,7 @@ test_unsigned_repo_left_untouched
 test_refuses_bare_common_config
 test_refuses_core_worktree_in_common_config
 test_allows_migrated_footgun_keys
+test_refuses_footgun_keys_copied_not_moved
 test_stale_override_is_cleared_before_the_gate
 test_stale_override_is_reestablished_when_still_needed
 # Run last: these deliberately restore signing in $WT, which earlier assertions need.

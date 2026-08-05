@@ -43,8 +43,13 @@
 #     worktree at the main working tree (core.worktree) or breaks them outright with
 #     "this operation must be run in a work tree" (core.bare=true) - repo-wide
 #     damage to a repo firstmate does not own, outliving the task. git documents
-#     that they must be moved into config.worktree before the extension goes on, so
-#     step 1 refuses on exactly that shape instead of writing the extension: the
+#     that they must be MOVED into config.worktree before the extension goes on, so
+#     step 1 refuses whenever the common config still carries either key - copying
+#     one into config.worktree and leaving the original in place does not make the
+#     repo safe, because a linked worktree reads only its OWN
+#     $GIT_DIR/config.worktree under .git/worktrees/<id>/ and never the main
+#     worktree's, so nothing there can neutralize the common-config value for it.
+#     Step 1 refuses instead of writing the extension: the
 #     caller warns, signing stays on, and the repo is left byte-untouched. Doing the
 #     migration for the operator is deliberately not attempted - rewriting the
 #     config of somebody else's repo is a bigger act than declining to sign.
@@ -114,22 +119,21 @@ worktree_common_config_dir() {
 # True when turning extensions.worktreeConfig on for this repo cannot change how
 # its OTHER worktrees behave. git ignores core.worktree and core.bare from the
 # common config while reading config for a linked worktree, but honors them there
-# once the extension is on, so a common config that still carries either key has to
-# be migrated into config.worktree by its owner first (git-config(1),
-# extensions.worktreeConfig). Unreadable or unlocatable common config is treated as
-# unsafe: this gate only ever says yes on a repo it could actually inspect.
+# once the extension is on, so the common config must not carry either key at all:
+# git-config(1) requires them MOVED into config.worktree, and only the owner of the
+# repo can do that. Presence in the common config is the whole test - a copy in
+# $GIT_COMMON_DIR/config.worktree does not redeem it, since that file belongs to the
+# main worktree and no linked worktree ever reads it. Unreadable or unlocatable
+# common config is treated as unsafe: this gate only ever says yes on a repo it
+# could actually inspect.
 worktree_config_extension_is_safe() {
   local wt=$1 common shared_worktree shared_bare
   common=$(worktree_common_config_dir "$wt") || return 1
   [ -f "$common/config" ] || return 1
   shared_worktree=$(git config --file "$common/config" --get-all core.worktree 2>/dev/null | tail -n 1 || true)
   shared_bare=$(git config --file "$common/config" --type=bool --get-all core.bare 2>/dev/null | tail -n 1 || true)
-  if [ -n "$shared_worktree" ] && [ -z "$(git config --file "$common/config.worktree" --get-all core.worktree 2>/dev/null | tail -n 1 || true)" ]; then
-    return 1
-  fi
-  if [ "$shared_bare" = true ] && [ -z "$(git config --file "$common/config.worktree" --type=bool --get-all core.bare 2>/dev/null | tail -n 1 || true)" ]; then
-    return 1
-  fi
+  [ -z "$shared_worktree" ] || return 1
+  [ "$shared_bare" != true ] || return 1
   return 0
 }
 
