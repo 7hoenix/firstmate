@@ -1,5 +1,4 @@
 {
-  "_note": "Example only. Copy to local config/crew-dispatch.json (gitignored). Firstmate applies a dispatch policy locally ONLY on the captain's approval; keep the cheap-model routing below a deliberate captain choice, not a default. The canonical schema lives in docs/configuration.md (Crew dispatch profiles).",
   "rules": [
     {
       "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
@@ -7,9 +6,9 @@
       "why": "Grok is the preferred dispatch when current web-connected context is central to the work."
     },
     {
-      "when": "The task is a trivial mechanical edit with low ambiguity: a rote rename, formatting sweep, targeted typo fix, a single-file config commit, a doc-only edit, a backlog or registry chore, or simple file gathering.",
+      "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
       "use": { "harness": "claude", "model": "haiku", "effort": "low" },
-      "why": "Route narrow, low-ambiguity mechanical work to the cheapest fast profile; these tasks do not need a strong reasoning model and burn far less quota."
+      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
     },
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
@@ -17,9 +16,11 @@
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "select": "quota-balanced",
-      "why": "Use a strong coding profile for broad design and implementation work."
+      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
     }
   ],
-  "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
+  "default": [
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
+    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+  ]
 }

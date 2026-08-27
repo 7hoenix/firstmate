@@ -45,6 +45,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
 SESSION="fm-lab-respawn-idem-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-respawn-idem.XXXXXX")
@@ -55,7 +60,7 @@ cleanup_all() {
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
@@ -65,16 +70,13 @@ fm_backend_herdr_version_check || fail "version_check failed against the real in
 # fm_backend_herdr_create_task is the ONE function both bin/fm-spawn.sh's
 # ordinary crewmate/scout path and its --secondmate path call, so exercising
 # it directly here covers both paths identically - already proven distinct
-# only in FM_HOME-shadowing (tests/fm-backend-herdr-workspace-per-task-e2e.test.sh),
+# only in FM_HOME-shadowing (tests/fm-backend-herdr-workspace-per-home-e2e.test.sh),
 # never in this duplicate-guard logic, which has no home-specific branching.
-# This drives the create_task husk/dup guard directly, so both task tabs are
-# created in ONE workspace (a primitive-level test artifact - the per-task
-# workspace shape is covered by the workspace-per-task e2e test).
 
 PROJ_CWD="$SCRATCH/proj"
 mkdir -p "$PROJ_CWD"
 
-RAW=$(fm_backend_herdr_container_ensure "$PROJ_CWD" fm-respawn-crew1) || fail "container_ensure failed"
+RAW=$(fm_backend_herdr_container_ensure "$PROJ_CWD") || fail "container_ensure failed"
 CONTAINER=${RAW%%$'\t'*}
 SEEDED_TAB_ID=${RAW#*$'\t'}
 WSID=${CONTAINER#*:}
